@@ -1,15 +1,20 @@
 {
   "holdings": [
     {
-      "ticker": "NVDA",
-      "shares": 10.0,
-      "cost_basis": 120.5
+      "ticker": "NBIL",
+      "shares": 70.0,
+      "cost_basis": 22.27
     },
     {
-      "ticker": "AAPL",
-      "shares": 5.0,
-      "cost_basis": 200.0
+      "ticker": "AAOG",
+      "shares": 460.0,
+      "cost_basis": 2.87
+    },
+    {
+      "ticker": "IONL",
+      "shares": 70.0,
+      "cost_basis": 14.22
     }
   ],
-  "updated_at": "2026-08-09T14:12:23Z"
+  "updated_at": "2026-08-09T15:18:33Z"
 }
