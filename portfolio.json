@@ -1,0 +1,15 @@
+{
+  "holdings": [
+    {
+      "ticker": "NVDA",
+      "shares": 10.0,
+      "cost_basis": 120.5
+    },
+    {
+      "ticker": "AAPL",
+      "shares": 5.0,
+      "cost_basis": 200.0
+    }
+  ],
+  "updated_at": "2026-08-09T14:12:23Z"
+}
