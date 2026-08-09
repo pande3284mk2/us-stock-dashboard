@@ -79,6 +79,49 @@ st.markdown(
         padding: 12px 14px;
         margin-bottom: 8px;
     }
+    .fact-box {
+        background: linear-gradient(145deg, #0d2436, #123049);
+        border: 1px solid #1f6fa8;
+        border-left: 4px solid #38bdf8;
+        border-radius: 10px;
+        padding: 12px 14px;
+        margin-bottom: 8px;
+        line-height: 1.6;
+    }
+    .insight-box {
+        background: linear-gradient(145deg, #241b36, #2c2140);
+        border: 1px solid #7c5cbf;
+        border-left: 4px solid #a78bfa;
+        border-radius: 10px;
+        padding: 12px 14px;
+        margin-bottom: 8px;
+        line-height: 1.6;
+    }
+    .confidence-badge {
+        display: inline-block;
+        font-size: 0.72rem;
+        font-weight: 700;
+        padding: 2px 9px;
+        border-radius: 999px;
+        margin-left: 8px;
+        vertical-align: middle;
+        white-space: nowrap;
+    }
+    .confidence-high {
+        background: rgba(124, 58, 237, 0.25);
+        color: #c4b5fd;
+        border: 1px solid #a78bfa;
+    }
+    .confidence-mid {
+        background: rgba(234, 179, 8, 0.2);
+        color: #fde68a;
+        border: 1px solid #eab308;
+    }
+    .confidence-low {
+        background: rgba(100, 116, 139, 0.25);
+        color: #cbd5e1;
+        border: 1px solid #64748b;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -101,6 +144,21 @@ SECTOR_ETFS = {
     "公益": "XLU",
     "不動産": "XLRE",
     "通信サービス": "XLC",
+}
+
+# 各セクターの代表的な大型株（5銘柄）。セクターETFの動きを個別銘柄レベルでも確認できるようにする。
+SECTOR_STOCKS = {
+    "情報技術": ["AAPL", "MSFT", "NVDA", "AVGO", "CRM"],
+    "ヘルスケア": ["UNH", "JNJ", "LLY", "ABBV", "MRK"],
+    "金融": ["JPM", "BAC", "WFC", "GS", "MS"],
+    "一般消費財": ["AMZN", "TSLA", "HD", "MCD", "NKE"],
+    "生活必需品": ["PG", "KO", "PEP", "WMT", "COST"],
+    "エネルギー": ["XOM", "CVX", "COP", "SLB", "EOG"],
+    "資本財": ["CAT", "HON", "UNP", "RTX", "BA"],
+    "素材": ["LIN", "SHW", "FCX", "ECL", "APD"],
+    "公益": ["NEE", "DUK", "SO", "D", "AEP"],
+    "不動産": ["PLD", "AMT", "EQIX", "PSA", "O"],
+    "通信サービス": ["GOOGL", "META", "NFLX", "DIS", "VZ"],
 }
 
 # 主要指数・資産カード
@@ -128,6 +186,13 @@ ARK_ETFS = "ARKK,ARKW,ARKG,ARKQ,ARKF,ARKX"
 
 # openinsider.com のクラスター買い一覧ページ
 OPENINSIDER_URL = "http://openinsider.com/latest-cluster-buys"
+
+# 毎朝配信しているHTMLダッシュボードの考察を、同じGitHubリポジトリに置いた
+# commentary.json 経由でこのサイトにも表示する（このサイト自体はリアルタイムの
+# ニュース分析はしない。事前に用意されたJSONを読み込んで表示するだけ）。
+COMMENTARY_URL = (
+    "https://raw.githubusercontent.com/pande3284mk2/us-stock-dashboard/main/commentary.json"
+)
 
 # 期間セレクターの選択肢
 # yf_period   : 騰落率計算に必要な株価データを取得する期間
@@ -272,6 +337,27 @@ def get_ark_trades():
         return None, None
 
 
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def get_commentary():
+    """同じGitHubリポジトリ直下の commentary.json を取得する。
+
+    このファイルは毎朝配信しているHTMLダッシュボード用に人が書いた考察を
+    JSON化したもので、このサイト自体が自動でニュース分析しているわけではない。
+    取得できない場合は None を返し、画面側で「準備中」メッセージを表示する。
+    """
+    try:
+        resp = requests.get(COMMENTARY_URL, timeout=15)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        return None
+
+
+def _confidence_class(confidence):
+    mapping = {"高": "confidence-high", "中": "confidence-mid", "低": "confidence-low"}
+    return mapping.get(str(confidence), "confidence-mid")
+
+
 # =====================================================
 # 画面表示用の補助関数
 # =====================================================
@@ -299,15 +385,18 @@ def render_index_cards(period_key):
 
 def render_sector_strength(period_key):
     cfg = PERIOD_OPTIONS[period_key]
-    tickers = list(SECTOR_ETFS.values())
-    price_data = fetch_prices(tuple(tickers), cfg["yf_period"])
+    etf_tickers = list(SECTOR_ETFS.values())
+    # 代表銘柄もまとめて1回のfetch_pricesで取得し、yfinanceへのアクセス回数を増やさない
+    stock_tickers = [t for stocks in SECTOR_STOCKS.values() for t in stocks]
+    all_tickers = etf_tickers + stock_tickers
+    price_data = fetch_prices(tuple(all_tickers), cfg["yf_period"])
 
     rows = []
     for name, ticker in SECTOR_ETFS.items():
         close = _extract_close(price_data, ticker)
         chg = _pct_change_from_series(close, cfg["lookback"])
         if chg is not None:
-            rows.append({"セクター": f"{name} ({ticker})", "騰落率": chg})
+            rows.append({"セクター名": name, "表示名": f"{name} ({ticker})", "騰落率": chg})
 
     if not rows:
         st.warning("セクターデータの取得に失敗しました。しばらく待ってから再読み込みしてください。")
@@ -318,7 +407,7 @@ def render_sector_strength(period_key):
     fig = go.Figure(
         go.Bar(
             x=df["騰落率"],
-            y=df["セクター"],
+            y=df["表示名"],
             orientation="h",
             marker_color=["#00cc96" if v >= 0 else "#ef553b" for v in df["騰落率"]],
             text=[f"{v:+.2f}%" for v in df["騰落率"]],
@@ -336,6 +425,28 @@ def render_sector_strength(period_key):
         showlegend=False,
     )
     st.plotly_chart(fig, use_container_width=True)
+
+    st.caption("セクターごとの代表銘柄別スコアを見るには、下の項目をクリックして展開してください。")
+    for _, row in df.iterrows():
+        sector_name = row["セクター名"]
+        stocks = SECTOR_STOCKS.get(sector_name, [])
+        if not stocks:
+            continue
+        with st.expander(f"{row['表示名']} の代表銘柄スコア"):
+            stock_cols = st.columns(len(stocks))
+            for col, stk in zip(stock_cols, stocks):
+                stk_close = _extract_close(price_data, stk)
+                stk_chg = _pct_change_from_series(stk_close, cfg["lookback"])
+                with col:
+                    if stk_chg is None or stk_close is None or stk_close.dropna().empty:
+                        st.metric(label=stk, value="取得失敗")
+                    else:
+                        last_price = stk_close.dropna().iloc[-1]
+                        st.metric(
+                            label=stk,
+                            value=f"${last_price:,.2f}",
+                            delta=f"{stk_chg:+.2f}%",
+                        )
 
 
 def render_cluster_buys():
@@ -411,6 +522,77 @@ def render_ark_trades():
                 )
 
 
+def render_commentary():
+    """毎朝配信しているHTMLダッシュボードの考察(commentary.json)を表示する。
+
+    事実(facts)は水色系の枠、考察(insights)・注目テーマ(themes)は紫系の枠＋
+    確度バッジで視覚的に区別する。ファイルが取得できない場合は準備中と案内する。
+    """
+    data = get_commentary()
+    if not data or not isinstance(data, dict):
+        st.info("📝 本日の考察はまだ準備中です。しばらくしてから再度ご確認ください。")
+        return
+
+    headline = data.get("headline", "")
+    lead = data.get("lead", "")
+    date_str = data.get("date", "")
+
+    if headline:
+        st.subheader(f"🗞️ {headline}")
+    if date_str:
+        st.caption(f"考察日: {date_str}")
+    if lead:
+        st.write(lead)
+
+    facts = data.get("facts", [])
+    if facts:
+        st.markdown("**🔵 事実（ファクト）**")
+        for f in facts:
+            text = f.get("text", "")
+            src = f.get("source_url")
+            src_html = (
+                f' <a href="{src}" target="_blank" style="color:#7dd3fc;">[出典]</a>'
+                if src
+                else ""
+            )
+            st.markdown(
+                f'<div class="fact-box">{text}{src_html}</div>',
+                unsafe_allow_html=True,
+            )
+
+    insights = data.get("insights", [])
+    if insights:
+        st.markdown("**🟣 考察（インサイト）**")
+        for ins in insights:
+            text = ins.get("text", "")
+            conf = ins.get("confidence", "中")
+            badge_cls = _confidence_class(conf)
+            st.markdown(
+                f'<div class="insight-box">{text}'
+                f'<span class="confidence-badge {badge_cls}">確度: {conf}</span></div>',
+                unsafe_allow_html=True,
+            )
+
+    themes = data.get("themes", [])
+    if themes:
+        st.markdown("**🎯 今後の注目テーマ**")
+        for th in themes:
+            title = th.get("title", "")
+            conf = th.get("confidence", "中")
+            text = th.get("text", "")
+            badge_cls = _confidence_class(conf)
+            st.markdown(
+                f'<div class="insight-box"><b>{title}</b>'
+                f'<span class="confidence-badge {badge_cls}">確度: {conf}</span><br>{text}</div>',
+                unsafe_allow_html=True,
+            )
+
+    st.caption(
+        "※ この考察セクションは、サイトがリアルタイムでニュースを分析しているわけではなく、"
+        "あらかじめ用意された commentary.json の内容を表示しています。"
+    )
+
+
 def render_correlation(period_key):
     cfg = PERIOD_OPTIONS[period_key]
     tickers = list(CORR_TICKERS.values())
@@ -451,6 +633,39 @@ def render_correlation(period_key):
     )
     st.plotly_chart(fig, use_container_width=True)
 
+    # 実際に計算されたデータの中から、最も相関が強い（絶対値が大きい）組み合わせを
+    # 具体例として動的に抽出する（数値を決め打ちにせず、その時点の事実に基づかせる）
+    example_html = ""
+    cols = corr.columns.tolist()
+    pairs = []
+    for i in range(len(cols)):
+        for j in range(i + 1, len(cols)):
+            pairs.append((cols[i], cols[j], corr.iloc[i, j]))
+    if pairs:
+        a, b, v = max(pairs, key=lambda p: abs(p[2]))
+        if v >= 0:
+            direction = "一方が上がるともう一方も上がりやすい（同じ方向に動きやすい）"
+        else:
+            direction = "一方が上がるともう一方は下がりやすい（逆方向に動きやすい）"
+        example_html = (
+            f"例えば、今回のデータでは <b>{a}</b> と <b>{b}</b> の相関係数が "
+            f"<b>{v:+.2f}</b> です。これは、{direction}という意味です。"
+        )
+
+    st.markdown(
+        f"""
+        <div class="fact-box" style="margin-top:12px;">
+        <b>📖 相関マトリクスの読み方</b><br>
+        ・値は −1.0 〜 +1.0 の範囲で、2つの資産の値動きがどれくらい同じ方向に動くかを表します。<br>
+        ・+1.0 に近いほど「同じ方向に動きやすい」、−1.0 に近いほど「逆方向に動きやすい」、0 に近いと「関連性が薄い」ことを意味します。<br>
+        ・対角線（同じ資産どうしが交わるマス）は必ず 1.0 になります（自分自身との相関のため）。<br>
+        ・配色は、<b>青系が正の相関</b>、<b>赤系が負の相関</b>を表しており、色が濃いほど相関が強いことを示します。<br><br>
+        {example_html}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
 
 # =====================================================
 # サイドバー
@@ -484,6 +699,9 @@ st.sidebar.caption(
 
 st.title("📊 米国株 大口投資家動向・セクター強弱ダッシュボード")
 st.caption("開くたびに最新データをその場で取得して表示します。")
+
+st.markdown('<div class="section-title">🗞️ 今日の相場考察</div>', unsafe_allow_html=True)
+render_commentary()
 
 st.markdown('<div class="section-title">🧭 主要指数・資産</div>', unsafe_allow_html=True)
 render_index_cards(period_key)
