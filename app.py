@@ -8,17 +8,18 @@
 
 含まれる機能:
   1. 主要指数カード（ダウ30・S&P500・ナスダック100・ビットコイン・金）
-  2. セクター強弱ランキング（11セクターETFの騰落率）
-  3. 内部者クラスター買い（openinsider.com からスクレイピング）
-  4. ARK Invest 売買動向（arkfunds.io の無料APIを利用）
+  2. セクター強弱ランキング（11セクターETFの騰落率、代表銘柄スコア付き）
+  3. テーマ強弱ランキング（半導体・AIインフラなど、より細かいテーマ単位の騰落率）
+  4. 大口投資家の動き（内部者クラスター買い / ARK Invest / SEC Form 13D / dataroma.com）
   5. 資産相関マトリクス（主要資産の値動きの相関）
   6. 期間セレクター（1日 / 1週間 / 1ヶ月）
 
 本サイトは事実整理であり、投資助言ではありません。
 """
 
+import re
 import warnings
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 import plotly.express as px
@@ -161,6 +162,37 @@ SECTOR_STOCKS = {
     "通信サービス": ["GOOGL", "META", "NFLX", "DIS", "VZ"],
 }
 
+# テーマ強弱ランキング用：セクターより細かいテーマ単位の代表銘柄（3〜5銘柄ずつ）
+THEME_STOCKS = {
+    "半導体": ["NVDA", "AMD", "TSM", "AVGO", "ASML"],
+    "メモリー": ["MU", "WDC", "STX"],
+    "量子コンピューティング": ["IONQ", "RGTI", "QBTS", "IBM"],
+    "光/フォトニクス": ["COHR", "LITE", "AAOI", "CIEN"],
+    "AIインフラ/データセンター": ["SMCI", "DELL", "VRT", "EQIX", "DLR"],
+    "ソフトウェア/SaaS": ["MSFT", "CRM", "NOW", "ADBE", "ORCL"],
+    "サイバーセキュリティ": ["CRWD", "PANW", "FTNT", "ZS"],
+    "バイオテック": ["VRTX", "REGN", "AMGN", "BIIB"],
+    "医療機器": ["MDT", "ISRG", "BSX", "SYK"],
+    "デジタルヘルス": ["TDOC", "DOCS", "HIMS"],
+    "製薬大手": ["LLY", "JNJ", "PFE", "MRK", "ABBV"],
+    "肥満症治療薬(GLP-1)": ["LLY", "NVO", "VKTX"],
+    "大手銀行": ["JPM", "BAC", "WFC", "C"],
+    "フィンテック": ["SQ", "PYPL", "SOFI", "AFRM"],
+    "保険": ["PGR", "AIG", "MET"],
+    "暗号資産関連株": ["COIN", "MSTR", "MARA", "RIOT"],
+    "Eコマース": ["AMZN", "SHOP", "MELI"],
+    "外食": ["MCD", "SBUX", "CMG", "YUM"],
+    "アパレル/小売": ["NKE", "LULU", "TJX"],
+    "自動車/EV": ["TSLA", "RIVN", "GM", "F"],
+    "石油ガス": ["XOM", "CVX", "COP"],
+    "再生可能エネルギー": ["FSLR", "ENPH"],
+    "電池材料/リチウム": ["ALB", "SQM"],
+    "貴金属/鉱業": ["NEM", "FCX", "GOLD"],
+    "防衛/航空宇宙": ["LMT", "RTX", "NOC", "BA"],
+    "通信キャリア": ["VZ", "T", "TMUS"],
+    "メディア/エンタメ": ["DIS", "NFLX", "WBD"],
+}
+
 # 主要指数・資産カード
 INDEX_TICKERS = {
     "ダウ30": ("^DJI", "💵"),
@@ -186,6 +218,18 @@ ARK_ETFS = "ARKK,ARKW,ARKG,ARKQ,ARKF,ARKX"
 
 # openinsider.com のクラスター買い一覧ページ
 OPENINSIDER_URL = "http://openinsider.com/latest-cluster-buys"
+
+# SEC（米国証券取引委員会）EDGAR の全文検索API。
+# SEC EDGARのデータは米国政府による公開情報であり、著作権上の制約なく誰でも無料で利用できる。
+# SECは自動アクセス時、連絡先入りのUser-Agentを送ることを推奨しているため、それに従っている。
+# （SEC公式ガイド: https://www.sec.gov/os/webmaster-faq#developers ）
+SEC_EDGAR_FULLTEXT_URL = "https://efts.sec.gov/LATEST/search-index"
+SEC_USER_AGENT = "us-stock-dashboard personal-use-app (contact: github.com/pande3284mk2)"
+
+# dataroma.com（著名投資家の13F保有情報をまとめた無料サイト）のトップページ。
+# 利用規約上、データの一括転載・再配布は禁止されているため、本アプリでは
+# 「出典を明記した上でのごく小部分の参照利用」の範囲に限定して取得する。
+DATAROMA_URL = "https://www.dataroma.com/"
 
 # 毎朝配信しているHTMLダッシュボードの考察を、同じGitHubリポジトリに置いた
 # commentary.json 経由でこのサイトにも表示する（このサイト自体はリアルタイムの
@@ -338,6 +382,114 @@ def get_ark_trades():
 
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def get_sec_13d_filings(days_back=30, max_results=15):
+    """SEC EDGARの全文検索APIを使い、直近のSchedule 13D（5%超保有の新規取得・変更等）の
+    提出一覧を取得する。
+
+    Schedule 13Dは「対象企業の議決権株式を5%超保有し、経営に関与する意図がある投資家」が
+    提出する書類で、アクティビスト投資家など「大口投資家の新たな動き」を知る手がかりになる。
+    直近30日間に該当する提出がない場合は空リストになる（13Dは提出頻度自体が高くないため、
+    「取得失敗」ではなく単に「該当なし」の場合もある）。
+    """
+    try:
+        end_date = datetime.now().date()
+        start_date = end_date - timedelta(days=days_back)
+        params = {
+            "q": '""',
+            "forms": "SCHEDULE 13D",
+            "dateRange": "custom",
+            "startdt": start_date.isoformat(),
+            "enddt": end_date.isoformat(),
+        }
+        headers = {"User-Agent": SEC_USER_AGENT}
+        resp = requests.get(
+            SEC_EDGAR_FULLTEXT_URL, params=params, headers=headers, timeout=20
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        hits = data.get("hits", {}).get("hits", [])
+
+        rows = []
+        for h in hits:
+            src = h.get("_source", {})
+            names = src.get("display_names", [])
+            file_date = src.get("file_date", "")
+            doc_id = h.get("_id", "")
+            if not names or ":" not in doc_id:
+                continue
+
+            issuer_raw = names[0]
+            filers_raw = "、".join(names[1:]) if len(names) > 1 else "-"
+            issuer = re.sub(r"\s*\(CIK \d+\)", "", issuer_raw).strip()
+            filers = re.sub(r"\s*\(CIK \d+\)", "", filers_raw).strip()
+
+            accession, filename = doc_id.split(":", 1)
+            doc_url = None
+            cik_match = re.search(r"CIK (\d+)", issuer_raw)
+            if cik_match:
+                cik_nolead = str(int(cik_match.group(1)))
+                accession_nodash = accession.replace("-", "")
+                doc_url = (
+                    f"https://www.sec.gov/Archives/edgar/data/"
+                    f"{cik_nolead}/{accession_nodash}/{filename}"
+                )
+
+            rows.append(
+                {
+                    "対象企業": issuer,
+                    "投資家(提出者)": filers,
+                    "提出日": file_date,
+                    "url": doc_url,
+                }
+            )
+
+        rows.sort(key=lambda r: r["提出日"], reverse=True)
+        return rows[:max_results]
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def get_dataroma_highlights():
+    """dataroma.com（著名投資家=スーパーインベスターの13F保有情報をまとめた無料サイト）の
+    トップページから、直近のインサイダー買い情報を取得する。
+
+    dataroma.comの利用規約では、出典を明記した「小部分の参照利用」は認められている一方、
+    データの一括転載・再配布は禁止されている。そのため本アプリでは、全件ではなく
+    上位5件だけを出典リンク付きで表示する（過度なスクレイピングを避けるための意図的な制限）。
+    """
+    try:
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            )
+        }
+        resp = requests.get(DATAROMA_URL, headers=headers, timeout=20)
+        resp.raise_for_status()
+
+        try:
+            tables = pd.read_html(resp.text)
+        except ValueError:
+            tables = []
+
+        target_df = None
+        for t in tables:
+            cols = [str(c) for c in t.columns]
+            if "Stock" in cols and any("Value" in c for c in cols):
+                target_df = t
+                break
+
+        if target_df is None or target_df.empty:
+            return None
+
+        return target_df.head(5).reset_index(drop=True)
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def get_commentary():
     """同じGitHubリポジトリ直下の commentary.json を取得する。
 
@@ -449,6 +601,69 @@ def render_sector_strength(period_key):
                         )
 
 
+def render_theme_strength(period_key):
+    """セクターより細かい「テーマ」単位（半導体・AIインフラなど）の強弱ランキングを表示する。
+
+    各テーマの代表銘柄（3〜5銘柄）をすべてまとめて1回のfetch_pricesで取得し、
+    テーマごとに代表銘柄の期間内騰落率を単純平均してスコア化する。
+    """
+    cfg = PERIOD_OPTIONS[period_key]
+    all_tickers = sorted({t for stocks in THEME_STOCKS.values() for t in stocks})
+    price_data = fetch_prices(tuple(all_tickers), cfg["yf_period"])
+
+    rows = []
+    for theme_name, stocks in THEME_STOCKS.items():
+        changes = []
+        for t in stocks:
+            close = _extract_close(price_data, t)
+            chg = _pct_change_from_series(close, cfg["lookback"])
+            if chg is not None:
+                changes.append(chg)
+        if changes:
+            rows.append(
+                {
+                    "テーマ名": theme_name,
+                    "騰落率": sum(changes) / len(changes),
+                    "構成銘柄": "/".join(stocks),
+                    "取得できた銘柄数": f"{len(changes)}/{len(stocks)}",
+                }
+            )
+
+    if not rows:
+        st.warning("テーマ強弱データの取得に失敗しました。しばらく待ってから再読み込みしてください。")
+        return
+
+    df = pd.DataFrame(rows).sort_values("騰落率", ascending=False)
+
+    fig = go.Figure(
+        go.Bar(
+            x=df["騰落率"],
+            y=df["テーマ名"],
+            orientation="h",
+            marker_color=["#00cc96" if v >= 0 else "#ef553b" for v in df["騰落率"]],
+            text=[f"{v:+.2f}%" for v in df["騰落率"]],
+            textposition="outside",
+            customdata=df["構成銘柄"],
+            hovertemplate="<b>%{y}</b><br>平均騰落率: %{x:+.2f}%<br>構成銘柄: %{customdata}<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        template="plotly_dark",
+        height=800,
+        xaxis_title="平均騰落率 (%)",
+        yaxis=dict(autorange="reversed"),
+        margin=dict(l=10, r=30, t=20, b=10),
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        showlegend=False,
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption(
+        "各テーマの代表銘柄（3〜5銘柄）の期間内騰落率を単純平均したスコアです。"
+        "バーにカーソルを合わせると構成銘柄を確認できます。11セクターより細かい粒度の目安としてご利用ください。"
+    )
+
+
 def render_cluster_buys():
     df = get_cluster_buys()
     if df is None or df.empty:
@@ -520,6 +735,72 @@ def render_ark_trades():
                     """,
                     unsafe_allow_html=True,
                 )
+
+
+def render_sec_13d():
+    rows = get_sec_13d_filings()
+    if rows is None:
+        st.info(
+            "😔 SEC Form 13Dのデータを取得できませんでした。\n\n"
+            "SEC EDGAR側の一時的な混雑や仕様変更の可能性があります。しばらく待ってから再度お試しください。"
+        )
+        return
+    if len(rows) == 0:
+        st.info("📭 直近30日間に該当するSchedule 13Dの提出はありませんでした。")
+        return
+
+    st.caption(f"直近30日間に提出されたSchedule 13D（5%超保有の新規取得・変更等）（最大{len(rows)}件）")
+    for r in rows:
+        link = (
+            f' <a href="{r["url"]}" target="_blank" style="color:#7dd3fc;">[提出書類]</a>'
+            if r.get("url")
+            else ""
+        )
+        st.markdown(
+            f"""
+            <div class="buy-card">
+            <b>🏛️ {r['投資家(提出者)']}</b> → {r['対象企業']}<br>
+            <span class="small-note">提出日: {r['提出日']}{link}</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    st.caption("出典: SEC EDGAR Full Text Search (efts.sec.gov) ／ 米国政府の公開データです。")
+
+
+def render_dataroma_highlights():
+    df = get_dataroma_highlights()
+    if df is None or df.empty:
+        st.info(
+            "😔 dataroma.comのデータを取得できませんでした。\n\n"
+            "サイト側の一時的な混雑や構成変更の可能性があります。しばらく待ってから再度お試しください。"
+        )
+        return
+
+    st.caption(
+        "著名投資家（スーパーインベスター）が保有する銘柄における、直近のインサイダー買い"
+        "（利用規約に配慮し上位5件のみ抜粋）"
+    )
+    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.caption(
+        "出典: [dataroma.com](https://www.dataroma.com/) "
+        "（利用規約に基づき、一括転載ではなく小部分のみを引用しています）"
+    )
+
+
+def render_institutional_investors():
+    """「大口投資家の動き」を、4つの情報源をタブで切り替えて俯瞰できるようにする。"""
+    tab1, tab2, tab3, tab4 = st.tabs(
+        ["🕵️ 内部者クラスター買い", "🚀 ARK Invest", "📜 SEC Form 13D", "💎 著名投資家(Dataroma)"]
+    )
+    with tab1:
+        render_cluster_buys()
+    with tab2:
+        render_ark_trades()
+    with tab3:
+        render_sec_13d()
+    with tab4:
+        render_dataroma_highlights()
 
 
 def render_commentary():
@@ -689,7 +970,8 @@ st.sidebar.caption(
     "最終読み込み時刻: " + datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 )
 st.sidebar.caption(
-    "データ提供元: Yahoo!ファイナンス (yfinance) / openinsider.com / arkfunds.io"
+    "データ提供元: Yahoo!ファイナンス (yfinance) / openinsider.com / arkfunds.io / "
+    "SEC EDGAR / dataroma.com"
 )
 
 
@@ -709,13 +991,13 @@ render_index_cards(period_key)
 st.markdown('<div class="section-title">🏭 セクター強弱ランキング</div>', unsafe_allow_html=True)
 render_sector_strength(period_key)
 
-col_left, col_right = st.columns(2)
-with col_left:
-    st.markdown('<div class="section-title">🕵️ 内部者クラスター買い</div>', unsafe_allow_html=True)
-    render_cluster_buys()
-with col_right:
-    st.markdown('<div class="section-title">🚀 ARK Invest 売買動向</div>', unsafe_allow_html=True)
-    render_ark_trades()
+st.markdown('<div class="section-title">🎯 テーマ強弱ランキング</div>', unsafe_allow_html=True)
+st.caption("11セクターよりさらに細かい「テーマ」単位（半導体・AIインフラ・GLP-1など27テーマ）の強弱ランキングです。")
+render_theme_strength(period_key)
+
+st.markdown('<div class="section-title">🏦 大口投資家の動き</div>', unsafe_allow_html=True)
+st.caption("内部者クラスター買い・ARK Invest・SEC Form 13D・著名投資家(dataroma)の4つの情報源をタブで切り替えて確認できます。")
+render_institutional_investors()
 
 st.markdown('<div class="section-title">🔗 資産相関マトリクス</div>', unsafe_allow_html=True)
 render_correlation(period_key)
