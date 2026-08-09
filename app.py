@@ -8,15 +8,18 @@
 
 含まれる機能:
   1. 主要指数カード（ダウ30・S&P500・ナスダック100・ビットコイン・金）
-  2. セクター強弱ランキング（11セクターETFの騰落率、代表銘柄スコア付き）
-  3. テーマ強弱ランキング（半導体・AIインフラなど、より細かいテーマ単位の騰落率）
-  4. 大口投資家の動き（内部者クラスター買い / ARK Invest / SEC Form 13D / dataroma.com）
-  5. 資産相関マトリクス（主要資産の値動きの相関）
-  6. 期間セレクター（1日 / 1週間 / 1ヶ月）
+  2. テーマ強弱ランキング（半導体・AIインフラなど27テーマの騰落率、代表銘柄スコア付き）
+  3. セクター強弱ランキング（11セクターETFの騰落率・参考情報として折りたたみ表示）
+  4. マイポートフォリオ（保有銘柄の登録・評価損益・見立てコーナー）
+  5. 大口投資家の動き（内部者クラスター買い / ARK Invest / SEC Form 13D / dataroma.com）
+  6. 資産相関マトリクス（主要資産の値動きの相関）
+  7. 期間セレクター（1日 / 1週間 / 1ヶ月）
 
 本サイトは事実整理であり、投資助言ではありません。
 """
 
+import base64
+import json
 import re
 import warnings
 from datetime import datetime, timedelta
@@ -221,6 +224,8 @@ OPENINSIDER_URL = "http://openinsider.com/latest-cluster-buys"
 
 # SEC（米国証券取引委員会）EDGAR の全文検索API。
 # SEC EDGARのデータは米国政府による公開情報であり、著作権上の制約なく誰でも無料で利用できる。
+# SECは自動アクセス時、連絡先入りのUser-Agentを送ることを推奨しているため、それに従っている。
+# （SEC公式ガイド: https://www.sec.gov/os/webmaster-faq#developers ）
 SEC_EDGAR_FULLTEXT_URL = "https://efts.sec.gov/LATEST/search-index"
 # SECは自動アクセス時、連絡先メール入りのUser-Agentを推奨しているが、本アプリは
 # 個人利用の範囲であり、実際のブラウザと同じUser-Agentを送ることで安定してアクセスできている。
@@ -234,6 +239,14 @@ SEC_USER_AGENT = (
 # 利用規約上、データの一括転載・再配布は禁止されているため、本アプリでは
 # 「出典を明記した上でのごく小部分の参照利用」の範囲に限定して取得する。
 DATAROMA_URL = "https://www.dataroma.com/"
+
+# マイポートフォリオ機能：保有銘柄をportfolio.jsonとしてGitHubリポジトリに保存し、
+# 次回アクセス時にはそこから読み込んで復元する（GitHub Contents APIを使用）。
+# 保存にはStreamlit CloudのSecretsに設定したGITHUB_TOKEN（このリポジトリの
+# Contentsのみ Read/Write 権限を持つFine-grained PAT）を使う。
+GITHUB_REPO = "pande3284mk2/us-stock-dashboard"
+GITHUB_PORTFOLIO_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/contents/portfolio.json"
+MAX_PORTFOLIO_HOLDINGS = 5
 
 # 毎朝配信しているHTMLダッシュボードの考察を、同じGitHubリポジトリに置いた
 # commentary.json 経由でこのサイトにも表示する（このサイト自体はリアルタイムの
@@ -518,6 +531,205 @@ def _confidence_class(confidence):
     return mapping.get(str(confidence), "confidence-mid")
 
 
+def _get_github_token():
+    """Streamlit CloudのSecretsに設定されたGitHubトークンを取得する。未設定ならNone。"""
+    try:
+        return st.secrets["GITHUB_TOKEN"]
+    except Exception:
+        return None
+
+
+def _github_headers():
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    token = _get_github_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def load_portfolio_from_github():
+    """GitHubリポジトリ直下の portfolio.json を読み込む。
+
+    ファイルがまだ存在しない場合や取得に失敗した場合は、空のポートフォリオを返す
+    （エラーにはしない。初回利用時は誰でもファイルがまだ無い状態のため）。
+    """
+    try:
+        resp = requests.get(GITHUB_PORTFOLIO_API_URL, headers=_github_headers(), timeout=15)
+        if resp.status_code == 404:
+            return {"holdings": [], "updated_at": None}
+        resp.raise_for_status()
+        data = resp.json()
+        content_b64 = data.get("content", "")
+        decoded = base64.b64decode(content_b64).decode("utf-8")
+        portfolio = json.loads(decoded)
+        if "holdings" not in portfolio:
+            portfolio["holdings"] = []
+        return portfolio
+    except Exception:
+        return {"holdings": [], "updated_at": None}
+
+
+def save_portfolio_to_github(holdings):
+    """保有銘柄リストを portfolio.json としてGitHubリポジトリに保存する。
+
+    GitHub Contents APIの仕様上、既存ファイルを更新する場合は現在のsha（版を示す識別子）
+    を事前に取得してPUTリクエストに含める必要があるため、
+    (1) GET で既存ファイルの有無とshaを確認 → (2) PUT で新規作成/更新、という順で行う。
+    """
+    token = _get_github_token()
+    if not token:
+        return False, "GitHubトークン（GITHUB_TOKEN）がStreamlit CloudのSecretsに設定されていません。"
+    try:
+        sha = None
+        get_resp = requests.get(GITHUB_PORTFOLIO_API_URL, headers=_github_headers(), timeout=15)
+        if get_resp.status_code == 200:
+            sha = get_resp.json().get("sha")
+
+        payload_dict = {
+            "holdings": holdings,
+            "updated_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        content_str = json.dumps(payload_dict, ensure_ascii=False, indent=2)
+        content_b64 = base64.b64encode(content_str.encode("utf-8")).decode("utf-8")
+
+        put_payload = {
+            "message": "Update portfolio.json via dashboard",
+            "content": content_b64,
+        }
+        if sha:
+            put_payload["sha"] = sha
+
+        put_resp = requests.put(
+            GITHUB_PORTFOLIO_API_URL,
+            headers=_github_headers(),
+            json=put_payload,
+            timeout=15,
+        )
+        put_resp.raise_for_status()
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+def init_portfolio_state():
+    """セッション開始時（ページを開いた/リロードした時）に1度だけ、
+    GitHub上のportfolio.jsonを読み込んで入力フォームの初期値として復元する。
+    """
+    if "portfolio_loaded" in st.session_state:
+        return
+    data = load_portfolio_from_github()
+    holdings = data.get("holdings", [])[:MAX_PORTFOLIO_HOLDINGS]
+    for i in range(MAX_PORTFOLIO_HOLDINGS):
+        if i < len(holdings):
+            h = holdings[i]
+            st.session_state[f"pf_ticker_{i}"] = str(h.get("ticker", "")).strip().upper()
+            st.session_state[f"pf_shares_{i}"] = float(h.get("shares", 0) or 0)
+            st.session_state[f"pf_cost_{i}"] = float(h.get("cost_basis", 0) or 0)
+        else:
+            st.session_state[f"pf_ticker_{i}"] = ""
+            st.session_state[f"pf_shares_{i}"] = 0.0
+            st.session_state[f"pf_cost_{i}"] = 0.0
+    st.session_state["portfolio_loaded"] = True
+
+
+def _current_portfolio_holdings():
+    """入力フォーム（st.session_state）から、有効な保有銘柄（ティッカー・株数が入力済み）
+    のリストを取り出す。"""
+    holdings = []
+    for i in range(MAX_PORTFOLIO_HOLDINGS):
+        ticker = str(st.session_state.get(f"pf_ticker_{i}", "")).strip().upper()
+        shares = st.session_state.get(f"pf_shares_{i}", 0.0) or 0.0
+        cost = st.session_state.get(f"pf_cost_{i}", 0.0) or 0.0
+        if ticker and shares > 0:
+            holdings.append({"ticker": ticker, "shares": shares, "cost_basis": cost})
+    return holdings
+
+
+def _find_theme_for_ticker(ticker):
+    """指定ティッカーが属するテーマ名の一覧を返す（複数のテーマに属する場合もある）。"""
+    return [name for name, stocks in THEME_STOCKS.items() if ticker in stocks]
+
+
+def _find_sector_for_ticker(ticker):
+    """指定ティッカーが属するセクター名を返す（見つからなければNone）。"""
+    for name, stocks in SECTOR_STOCKS.items():
+        if ticker in stocks:
+            return name
+    return None
+
+
+def _find_related_commentary(commentary_data, ticker, theme_names, sector_name):
+    """commentary.jsonのthemes/insightsの中から、指定銘柄のテーマ名・セクター名・
+    ティッカー自体のいずれかが本文に含まれているものを、簡易的な部分一致で探す。
+
+    これは高度なAI分析ではなく、あらかじめ人が書いたcommentary.jsonの文章の中から
+    キーワードが一致する箇所を機械的に抜き出しているだけである点に注意。
+    """
+    if not commentary_data:
+        return []
+    keywords = {k for k in list(theme_names) + [sector_name, ticker] if k}
+    matches = []
+    for th in commentary_data.get("themes", []):
+        title = th.get("title", "")
+        text = th.get("text", "")
+        combined = f"{title}{text}"
+        if any(kw in combined for kw in keywords):
+            matches.append(
+                {
+                    "type": "テーマ",
+                    "title": title,
+                    "text": text,
+                    "confidence": th.get("confidence", "中"),
+                }
+            )
+    for ins in commentary_data.get("insights", []):
+        text = ins.get("text", "")
+        if any(kw in text for kw in keywords):
+            matches.append(
+                {
+                    "type": "考察",
+                    "title": None,
+                    "text": text,
+                    "confidence": ins.get("confidence", "中"),
+                }
+            )
+    return matches
+
+
+def _find_institutional_mentions(ticker):
+    """大口投資家コーナー（ARK・内部者クラスター買い・SEC Form 13D）のデータの中に、
+    指定ティッカーに関する言及がないか探す。既にキャッシュ済みのデータを再利用するため、
+    追加のネットワークアクセスは発生しない（同じ関数を同一セッション内で再度呼ぶだけ）。
+    """
+    mentions = []
+
+    buys, sells = get_ark_trades()
+    if buys is not None and not buys.empty and "ticker" in buys.columns:
+        if (buys["ticker"] == ticker).any():
+            mentions.append(f"🚀 ARK Investが直近、{ticker}を買い増ししています。")
+    if sells is not None and not sells.empty and "ticker" in sells.columns:
+        if (sells["ticker"] == ticker).any():
+            mentions.append(f"🚀 ARK Investが直近、{ticker}を売却しています。")
+
+    cluster_df = get_cluster_buys()
+    if cluster_df is not None and not cluster_df.empty and "Ticker" in cluster_df.columns:
+        if (cluster_df["Ticker"] == ticker).any():
+            mentions.append(f"🕵️ 直近、{ticker}で複数役員による自社株クラスター買いが確認されています。")
+
+    filings = get_sec_13d_filings()
+    if filings:
+        for f in filings:
+            issuer = f.get("対象企業", "")
+            if f"({ticker})" in issuer or issuer == ticker:
+                investor = f.get("投資家(提出者)", "-")
+                mentions.append(f"📜 SEC Form 13Dで、{investor} が {ticker} について5%超保有の提出を行っています。")
+
+    return mentions
+
+
 # =====================================================
 # 画面表示用の補助関数
 # =====================================================
@@ -608,16 +820,23 @@ def render_sector_strength(period_key):
                             delta=f"{stk_chg:+.2f}%",
                         )
 
-
-def render_theme_strength(period_key):
-    """セクターより細かい「テーマ」単位（半導体・AIインフラなど）の強弱ランキングを表示する。
-
-    各テーマの代表銘柄（3〜5銘柄）をすべてまとめて1回のfetch_pricesで取得し、
-    テーマごとに代表銘柄の期間内騰落率を単純平均してスコア化する。
-    """
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def _theme_price_data(period_key):
+    """全27テーマの代表銘柄をまとめて1回のfetch_pricesで取得する（内部用）。"""
     cfg = PERIOD_OPTIONS[period_key]
     all_tickers = sorted({t for stocks in THEME_STOCKS.values() for t in stocks})
-    price_data = fetch_prices(tuple(all_tickers), cfg["yf_period"])
+    return fetch_prices(tuple(all_tickers), cfg["yf_period"])
+
+
+def compute_theme_ranking(period_key):
+    """全27テーマの強弱ランキングを計算する。
+
+    各テーマの代表銘柄（3〜5銘柄）の期間内騰落率を単純平均してスコア化し、
+    強い順にソートした上で「順位」列を付与したDataFrameを返す。
+    マイポートフォリオの「見立て」コーナーからも同じ計算結果を再利用する。
+    """
+    cfg = PERIOD_OPTIONS[period_key]
+    price_data = _theme_price_data(period_key)
 
     rows = []
     for theme_name, stocks in THEME_STOCKS.items():
@@ -638,10 +857,25 @@ def render_theme_strength(period_key):
             )
 
     if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows).sort_values("騰落率", ascending=False).reset_index(drop=True)
+    df["順位"] = df.index + 1
+    return df
+
+
+def render_theme_strength(period_key):
+    """セクターより細かい「テーマ」単位（半導体・AIインフラなど）の強弱ランキングを、
+    このダッシュボードの主役セクションとして表示する。各テーマは展開すると
+    代表銘柄ごとの個別スコア（価格・騰落率）も確認できる。
+    """
+    df = compute_theme_ranking(period_key)
+    if df.empty:
         st.warning("テーマ強弱データの取得に失敗しました。しばらく待ってから再読み込みしてください。")
         return
 
-    df = pd.DataFrame(rows).sort_values("騰落率", ascending=False)
+    price_data = _theme_price_data(period_key)
+    cfg = PERIOD_OPTIONS[period_key]
 
     fig = go.Figure(
         go.Bar(
@@ -668,8 +902,30 @@ def render_theme_strength(period_key):
     st.plotly_chart(fig, use_container_width=True)
     st.caption(
         "各テーマの代表銘柄（3〜5銘柄）の期間内騰落率を単純平均したスコアです。"
-        "バーにカーソルを合わせると構成銘柄を確認できます。11セクターより細かい粒度の目安としてご利用ください。"
+        "バーにカーソルを合わせると構成銘柄を確認できます。"
     )
+
+    st.caption("テーマごとの代表銘柄別スコアを見るには、下の項目をクリックして展開してください。")
+    for _, row in df.iterrows():
+        theme_name = row["テーマ名"]
+        stocks = THEME_STOCKS.get(theme_name, [])
+        if not stocks:
+            continue
+        with st.expander(f"第{int(row['順位'])}位　{theme_name}（{row['騰落率']:+.2f}%）の代表銘柄スコア"):
+            stock_cols = st.columns(len(stocks))
+            for col, stk in zip(stock_cols, stocks):
+                stk_close = _extract_close(price_data, stk)
+                stk_chg = _pct_change_from_series(stk_close, cfg["lookback"])
+                with col:
+                    if stk_chg is None or stk_close is None or stk_close.dropna().empty:
+                        st.metric(label=stk, value="取得失敗")
+                    else:
+                        last_price = stk_close.dropna().iloc[-1]
+                        st.metric(
+                            label=stk,
+                            value=f"${last_price:,.2f}",
+                            delta=f"{stk_chg:+.2f}%",
+                        )
 
 
 def render_cluster_buys():
@@ -809,6 +1065,198 @@ def render_institutional_investors():
         render_sec_13d()
     with tab4:
         render_dataroma_highlights()
+
+
+def render_portfolio_form():
+    """保有銘柄の入力フォーム（最大5銘柄）。「保存する」を押すとGitHub上の
+    portfolio.jsonに書き込む。
+    """
+    st.caption(
+        f"最大{MAX_PORTFOLIO_HOLDINGS}銘柄まで登録できます。"
+        "ティッカー・保有株数・取得単価（1株あたり）を入力して「保存する」を押してください。"
+    )
+    for i in range(MAX_PORTFOLIO_HOLDINGS):
+        cols = st.columns([2, 2, 2])
+        with cols[0]:
+            st.text_input(f"ティッカー {i + 1}", key=f"pf_ticker_{i}", placeholder="例: NVDA")
+        with cols[1]:
+            st.number_input(
+                f"保有株数 {i + 1}",
+                key=f"pf_shares_{i}",
+                min_value=0.0,
+                step=1.0,
+                format="%.4f",
+            )
+        with cols[2]:
+            st.number_input(
+                f"取得単価(1株) {i + 1}",
+                key=f"pf_cost_{i}",
+                min_value=0.0,
+                step=0.01,
+                format="%.2f",
+            )
+
+    if st.button("💾 保存する"):
+        holdings = _current_portfolio_holdings()
+        ok, err = save_portfolio_to_github(holdings)
+        if ok:
+            st.success("✅ ポートフォリオをGitHubに保存しました。次回このアプリを開いた時にも復元されます。")
+        else:
+            st.error(f"😔 保存に失敗しました：{err}")
+
+
+def render_portfolio_holdings(period_key):
+    """保有銘柄それぞれについて、現在値・評価損益（金額／％）を計算して表示する。
+    次の「見立て」コーナーで使うため、各銘柄の現在値・期間内騰落率も含めて返す。
+    """
+    holdings = _current_portfolio_holdings()
+    if not holdings:
+        st.info("📭 保有銘柄が登録されていません。上のフォームから入力して保存してください。")
+        return []
+
+    cfg = PERIOD_OPTIONS[period_key]
+    tickers = [h["ticker"] for h in holdings]
+    price_data = fetch_prices(tuple(tickers), cfg["yf_period"])
+
+    results = []
+    for h in holdings:
+        close = _extract_close(price_data, h["ticker"])
+        period_chg = _pct_change_from_series(close, cfg["lookback"])
+        current_price = None
+        if close is not None and not close.dropna().empty:
+            current_price = close.dropna().iloc[-1]
+
+        cols = st.columns(4)
+        with cols[0]:
+            st.metric("銘柄", h["ticker"])
+        with cols[1]:
+            st.metric("取得単価", f"${h['cost_basis']:,.2f}")
+        if current_price is None:
+            with cols[2]:
+                st.metric("現在値", "取得失敗")
+            with cols[3]:
+                st.metric("評価損益", "-")
+        else:
+            pl_amount = (current_price - h["cost_basis"]) * h["shares"]
+            pl_pct = (current_price / h["cost_basis"] - 1) * 100 if h["cost_basis"] else None
+            with cols[2]:
+                st.metric(
+                    "現在値",
+                    f"${current_price:,.2f}",
+                    delta=f"{period_chg:+.2f}%" if period_chg is not None else None,
+                )
+            with cols[3]:
+                st.metric(
+                    "評価損益",
+                    f"${pl_amount:,.2f}",
+                    delta=f"{pl_pct:+.2f}%" if pl_pct is not None else None,
+                )
+
+        results.append(
+            {
+                **h,
+                "current_price": current_price,
+                "period_chg": period_chg,
+            }
+        )
+
+    return results
+
+
+def render_portfolio_assessment(holdings_with_price, period_key):
+    """保有銘柄ごとに、テーマ強弱ランキング・commentary.jsonの考察・大口投資家の動きを
+    突き合わせた「一つの見立て」を、既存の事実(水色)/考察(紫・確度バッジ)デザインで表示する。
+
+    これは投資助言ではなく、あくまで既に取得済みの公開情報を組み合わせて機械的に文章化した
+    参考情報である。関連情報が見つからない銘柄については、その旨を正直に表示する。
+    """
+    disclaimer = (
+        "⚠️ 本コーナーは投資助言ではなく、公開情報を組み合わせた参考情報です。"
+        "売買判断はご自身の責任で行ってください。"
+    )
+    st.caption(disclaimer)
+
+    if not holdings_with_price:
+        st.info("保有銘柄が登録されていないため、見立てを表示できません。")
+        return
+
+    theme_df = compute_theme_ranking(period_key)
+    total_themes = len(theme_df)
+    commentary_data = get_commentary()
+
+    for h in holdings_with_price:
+        ticker = h["ticker"]
+        theme_names = _find_theme_for_ticker(ticker)
+        sector_name = _find_sector_for_ticker(ticker)
+
+        st.markdown(f"**📌 {ticker}**")
+
+        best_theme_row = None
+        if theme_names and not theme_df.empty:
+            candidates = theme_df[theme_df["テーマ名"].isin(theme_names)]
+            if not candidates.empty:
+                best_theme_row = candidates.sort_values("順位").iloc[0]
+
+        # --- 事実（ファクト）：テーマ／セクター分類とランキング、大口投資家の動き ---
+        facts = []
+        if best_theme_row is not None:
+            facts.append(
+                f"{ticker}は「{best_theme_row['テーマ名']}」テーマに分類され、"
+                f"本日のテーマ強弱ランキングでは全{total_themes}テーマ中"
+                f"{int(best_theme_row['順位'])}位（平均騰落率 {best_theme_row['騰落率']:+.2f}%）です。"
+            )
+        if sector_name:
+            facts.append(f"伝統的な11セクター分類では「{sector_name}」セクターに属します。")
+        if h.get("period_chg") is not None:
+            facts.append(f"{ticker}自体の選択期間内の騰落率は {h['period_chg']:+.2f}% でした。")
+
+        facts.extend(_find_institutional_mentions(ticker))
+
+        if not facts:
+            facts.append(f"{ticker}について、本日時点でこのダッシュボードが把握している分類情報はありませんでした。")
+
+        for fact in facts:
+            st.markdown(f'<div class="fact-box">{fact}</div>', unsafe_allow_html=True)
+
+        # --- 考察（インサイト）：commentary.jsonとの関連付け＋総合的な位置づけ ---
+        related = _find_related_commentary(commentary_data, ticker, theme_names, sector_name)
+        if related:
+            for rel in related:
+                badge_cls = _confidence_class(rel["confidence"])
+                label = f"<b>[{rel['type']}] {rel['title']}</b><br>" if rel.get("title") else f"<b>[{rel['type']}]</b> "
+                st.markdown(
+                    f'<div class="insight-box">{label}{rel["text"]}'
+                    f'<span class="confidence-badge {badge_cls}">確度: {rel["confidence"]}</span></div>',
+                    unsafe_allow_html=True,
+                )
+
+        if best_theme_row is not None:
+            theme_chg = best_theme_row["騰落率"]
+            stock_chg = h.get("period_chg")
+            if stock_chg is not None:
+                same_direction = (theme_chg >= 0) == (stock_chg >= 0)
+                alignment = "この流れに沿っている" if same_direction else "この流れとはやや逆行している"
+            else:
+                alignment = "この流れに位置づけられそうです"
+            summary = (
+                f"保有銘柄「{ticker}」は本日「{best_theme_row['テーマ名']}」というテーマの動きと関連しており、"
+                f"あなたの保有は{alignment}可能性があります。"
+            )
+            st.markdown(
+                f'<div class="insight-box">{summary}'
+                f'<span class="confidence-badge confidence-mid">確度: 中</span></div>',
+                unsafe_allow_html=True,
+            )
+        elif not related:
+            st.markdown(
+                '<div class="insight-box">本日はこの銘柄に関する直接的な材料が見当たりません。'
+                '<span class="confidence-badge confidence-low">確度: 低</span></div>',
+                unsafe_allow_html=True,
+            )
+
+        st.markdown("<hr style='border-color:#2a2f3d; margin: 8px 0 16px 0;'>", unsafe_allow_html=True)
+
+    st.caption(disclaimer)
 
 
 def render_commentary():
@@ -996,12 +1444,32 @@ render_commentary()
 st.markdown('<div class="section-title">🧭 主要指数・資産</div>', unsafe_allow_html=True)
 render_index_cards(period_key)
 
-st.markdown('<div class="section-title">🏭 セクター強弱ランキング</div>', unsafe_allow_html=True)
-render_sector_strength(period_key)
-
 st.markdown('<div class="section-title">🎯 テーマ強弱ランキング</div>', unsafe_allow_html=True)
-st.caption("11セクターよりさらに細かい「テーマ」単位（半導体・AIインフラ・GLP-1など27テーマ）の強弱ランキングです。")
+st.caption("半導体・AIインフラ・GLP-1など27テーマ単位の強弱ランキングです。各テーマを展開すると代表銘柄ごとのスコアも確認できます。")
 render_theme_strength(period_key)
+
+st.markdown('<div class="section-title">🏭 セクター強弱ランキング（参考情報）</div>', unsafe_allow_html=True)
+st.caption("11セクターETF単位の、より粗い粒度のランキングです。参考情報として折りたたんでいます。")
+if "show_sector_section" not in st.session_state:
+    st.session_state["show_sector_section"] = False
+_sector_toggle_label = (
+    "▼ セクター強弱ランキングを閉じる"
+    if st.session_state["show_sector_section"]
+    else "▶ セクター強弱ランキングを表示する"
+)
+if st.button(_sector_toggle_label):
+    st.session_state["show_sector_section"] = not st.session_state["show_sector_section"]
+    st.rerun()
+if st.session_state["show_sector_section"]:
+    render_sector_strength(period_key)
+
+st.markdown('<div class="section-title">📁 マイポートフォリオ</div>', unsafe_allow_html=True)
+init_portfolio_state()
+render_portfolio_form()
+st.markdown("**💰 保有状況**")
+_portfolio_holdings = render_portfolio_holdings(period_key)
+st.markdown("**🔍 見立て**")
+render_portfolio_assessment(_portfolio_holdings, period_key)
 
 st.markdown('<div class="section-title">🏦 大口投資家の動き</div>', unsafe_allow_html=True)
 st.caption("内部者クラスター買い・ARK Invest・SEC Form 13D・著名投資家(dataroma)の4つの情報源をタブで切り替えて確認できます。")
