@@ -7,13 +7,16 @@
 サイトを開くたびに、その場で最新の株式データを取得して表示します。
 
 含まれる機能:
+  0. サイドバーでのページ切り替え（📊 分析ダッシュボード ／ 📁 マイポートフォリオ）
   1. 主要指数カード（ダウ30・S&P500・ナスダック100・ビットコイン・金）
-  2. テーマ強弱ランキング（半導体・AIインフラなど27テーマの騰落率、代表銘柄スコア付き）
+  2. テーマ強弱ランキング（半導体・AIインフラなど27テーマの騰落率、代表銘柄スコア＋ヒートマップ）
   3. セクター強弱ランキング（11セクターETFの騰落率・参考情報として折りたたみ表示）
-  4. マイポートフォリオ（保有銘柄の登録・評価損益・見立てコーナー）
-  5. 大口投資家の動き（内部者クラスター買い / ARK Invest / SEC Form 13D / dataroma.com）
-  6. 資産相関マトリクス（主要資産の値動きの相関）
-  7. 期間セレクター（1日 / 1週間 / 1ヶ月）
+  4. 本日の相場考察（強気テーマ／弱気テーマを同ボリュームで併記）
+  5. マイポートフォリオ（保有銘柄の登録・評価損益・4観点の見立て・日足チャート・
+     ポジション調整の両論併記・ポートフォリオ強化のテーマ提案）
+  6. 大口投資家の動き（内部者クラスター買い / ARK Invest / SEC Form 13D / dataroma.com）
+  7. 資産相関マトリクス（主要資産の値動きの相関）
+  8. 期間セレクター（1日 / 1週間 / 1ヶ月）
 
 本サイトは事実整理であり、投資助言ではありません。
 """
@@ -247,6 +250,27 @@ DATAROMA_URL = "https://www.dataroma.com/"
 GITHUB_REPO = "pande3284mk2/us-stock-dashboard"
 GITHUB_PORTFOLIO_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/contents/portfolio.json"
 MAX_PORTFOLIO_HOLDINGS = 5
+
+# レバレッジ型ETF・派生商品など、入力ティッカーが実体企業と異なる場合の変換辞書。
+# 評価損益（保有株数×現在値）は入力ティッカー自体の価格を使うが、テクニカル/
+# セクター・テーマ分類/ファンダメンタルズ/考察は、意味のある分析ができるよう
+# 実体のある本体銘柄に変換してから行う（レバレッジ型ETFは日々の変動率を
+# 増幅させただけの金融商品で、まともなファンダメンタルズ・テクニカル分析の対象にならないため）。
+# 対応関係が確認できていない銘柄は無理に登録せず、確認でき次第ここに追記していく。
+TICKER_ALIAS = {
+    "NBIL": "NBIS",  # GraniteShares 2x Long NBIS Daily ETF → Nebius Group N.V.
+    "IONL": "IONQ",  # GraniteShares 2x Long IONQ Daily ETF → IonQ, Inc.
+    "AAOG": "AAOI",  # Leverage Shares 2x Long AAOI Daily ETF → Applied Optoelectronics
+    # 例: "XYZL": "XYZ",  # 要確認：対応関係が確認できたら追記する
+}
+
+
+def resolve_analysis_ticker(ticker):
+    """分析（テクニカル/セクター・テーマ/ファンダメンタルズ/考察）用に、
+    レバレッジ型ETF等のティッカーを実体のある本体銘柄に変換する。
+    TICKER_ALIASに無いティッカーはそのまま返す。
+    """
+    return TICKER_ALIAS.get(str(ticker).upper(), ticker)
 
 # 毎朝配信しているHTMLダッシュボードの考察を、同じGitHubリポジトリに置いた
 # commentary.json 経由でこのサイトにも表示する（このサイト自体はリアルタイムの
@@ -730,6 +754,194 @@ def _find_institutional_mentions(ticker):
     return mentions
 
 
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def get_stock_history(ticker, period="6mo"):
+    """個別銘柄の日足データ（始値・高値・安値・終値）を取得する。
+    テクニカル分析（移動平均線など）とローソク足チャートの両方に使う。
+    """
+    try:
+        hist = yf.Ticker(ticker).history(period=period, interval="1d")
+        if hist is None or hist.empty:
+            return pd.DataFrame()
+        return hist
+    except Exception:
+        return pd.DataFrame()
+
+
+def compute_technical_view(ticker):
+    """20日・50日移動平均線との位置関係や、直近のゴールデンクロス/デッドクロス、
+    直近5営業日のモメンタムから、簡易的なテクニカル分析コメントを機械的に組み立てる。
+
+    これはAIによる予測ではなく、移動平均線の計算結果を条件分岐で文章化しているだけである点に注意。
+    """
+    hist = get_stock_history(ticker, "6mo")
+    close = hist["Close"].dropna() if not hist.empty else pd.Series(dtype=float)
+    if len(close) < 25:
+        return None
+
+    sma20 = close.rolling(20).mean()
+    sma50 = close.rolling(50).mean() if len(close) >= 50 else pd.Series(dtype=float)
+    last_close = close.iloc[-1]
+    last_sma20 = sma20.dropna().iloc[-1] if not sma20.dropna().empty else None
+    last_sma50 = sma50.dropna().iloc[-1] if not sma50.dropna().empty else None
+
+    cross = None
+    if not sma20.dropna().empty and not sma50.dropna().empty:
+        diff = (sma20 - sma50).dropna()
+        recent = diff.tail(10)
+        if len(recent) >= 2:
+            sign = (recent > 0).astype(int)
+            changes = sign.diff().dropna()
+            if (changes == 1).any():
+                cross = "ゴールデンクロス"
+            elif (changes == -1).any():
+                cross = "デッドクロス"
+
+    momentum_5d = None
+    if len(close) > 5:
+        momentum_5d = (close.iloc[-1] / close.iloc[-6] - 1) * 100
+
+    above20 = last_sma20 is not None and last_close >= last_sma20
+    above50 = last_sma50 is not None and last_close >= last_sma50
+    below20 = last_sma20 is not None and last_close < last_sma20
+    below50 = last_sma50 is not None and last_close < last_sma50
+
+    lines = []
+    if last_sma20 is not None:
+        pos20 = "上" if above20 else "下"
+        lines.append(f"20日移動平均線（¥VAL20）の{pos20}に位置しています。")
+    if last_sma50 is not None:
+        pos50 = "上" if above50 else "下"
+        lines.append(f"50日移動平均線（¥VAL50）の{pos50}に位置しています。")
+    if cross:
+        lines.append(f"直近10営業日以内に{cross}（20日線と50日線の交差）が発生しています。")
+    if momentum_5d is not None:
+        direction = "上昇" if momentum_5d >= 0 else "下落"
+        lines.append(f"直近5営業日の値動きは{momentum_5d:+.2f}%と{direction}基調です。")
+
+    if not lines:
+        return None
+
+    text = "テクニカル的には、" + "".join(lines)
+    text = text.replace("¥VAL20", f"${last_sma20:,.2f}" if last_sma20 is not None else "-")
+    text = text.replace("¥VAL50", f"${last_sma50:,.2f}" if last_sma50 is not None else "-")
+
+    return {
+        "text": text,
+        "above_sma20": above20,
+        "above_sma50": above50,
+        "below_sma20": below20,
+        "below_sma50": below50,
+        "cross": cross,
+        "momentum_5d": momentum_5d,
+    }
+
+
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def get_fundamentals(ticker):
+    """yfinanceのticker.infoから、株価指標（PER・利益率・売上成長率・時価総額）を取得する。
+    無料のyfinance経由のため、銘柄によっては一部の項目が取得できないことがある
+    （その場合は呼び出し側で「データなし」と表示する）。
+    """
+    try:
+        info = yf.Ticker(ticker).info or {}
+        return {
+            "trailingPE": info.get("trailingPE"),
+            "forwardPE": info.get("forwardPE"),
+            "profitMargins": info.get("profitMargins"),
+            "revenueGrowth": info.get("revenueGrowth"),
+            "marketCap": info.get("marketCap"),
+        }
+    except Exception:
+        return {}
+
+
+def render_fundamentals_text(ticker):
+    """ファンダメンタルズ指標を、取得できたものだけ簡潔な文章にまとめる。
+    取得できない項目は無理に埋めず「データなし」と表示する。
+    """
+    f = get_fundamentals(ticker)
+    if not f:
+        return "ファンダメンタルズデータを取得できませんでした。"
+
+    tpe = f.get("trailingPE")
+    fpe = f.get("forwardPE")
+    pm = f.get("profitMargins")
+    rg = f.get("revenueGrowth")
+    mc = f.get("marketCap")
+
+    parts = [
+        f"実績PER: {tpe:.1f}倍" if tpe else "実績PER: データなし",
+        f"予想PER: {fpe:.1f}倍" if fpe else "予想PER: データなし",
+        f"利益率: {pm * 100:+.1f}%" if pm is not None else "利益率: データなし",
+        f"売上成長率: {rg * 100:+.1f}%" if rg is not None else "売上成長率: データなし",
+        (f"時価総額: ¥MC" if mc else "時価総額: データなし"),
+    ]
+    text = " ／ ".join(parts)
+    text = text.replace("¥MC", f"${mc / 1e9:,.1f}B" if mc else "")
+    return text
+
+
+def render_stock_chart(ticker):
+    """保有銘柄の日足チャート（ローソク足、直近6ヶ月）を表示する。"""
+    hist = get_stock_history(ticker, "6mo")
+    if hist is None or hist.empty:
+        st.caption(f"{ticker}のチャートデータを取得できませんでした。")
+        return
+    fig = go.Figure(
+        data=[
+            go.Candlestick(
+                x=hist.index,
+                open=hist["Open"],
+                high=hist["High"],
+                low=hist["Low"],
+                close=hist["Close"],
+                increasing_line_color="#00cc96",
+                decreasing_line_color="#ef553b",
+                name=ticker,
+            )
+        ]
+    )
+    fig.update_layout(
+        template="plotly_dark",
+        height=320,
+        margin=dict(l=10, r=10, t=20, b=10),
+        xaxis_rangeslider_visible=False,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        showlegend=False,
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def _theme_institutional_overlap(theme_name):
+    """テーマの代表銘柄のいずれかが、大口投資家データ（ARK・クラスター買い・SEC 13D）に
+    登場していないか確認する（既にキャッシュ済みのデータを再利用）。
+    """
+    hits = []
+    for stk in THEME_STOCKS.get(theme_name, []):
+        hits.extend(_find_institutional_mentions(stk))
+    return hits
+
+
+def classify_commentary_themes(commentary_data):
+    """commentary.jsonのthemes配列を、本文中の簡易キーワードの出現数によって
+    「強気寄り」「弱気寄り」に機械的に振り分ける（AIによる判定ではない）。
+    """
+    bullish_words = ["上昇", "強い", "堅調", "資金流入", "買い増し", "追い風", "上振れ", "強含み", "好調", "高値"]
+    bearish_words = ["下落", "軟調", "弱い", "売り", "下振れ", "逆風", "懸念", "リスク", "軟化", "低調", "安値"]
+    bullish, bearish = [], []
+    for th in (commentary_data.get("themes", []) if commentary_data else []):
+        text = f"{th.get('title', '')}{th.get('text', '')}"
+        b = sum(1 for w in bullish_words if w in text)
+        r = sum(1 for w in bearish_words if w in text)
+        if r > b:
+            bearish.append(th)
+        else:
+            bullish.append(th)
+    return bullish, bearish
+
+
 # =====================================================
 # 画面表示用の補助関数
 # =====================================================
@@ -820,6 +1032,7 @@ def render_sector_strength(period_key):
                             delta=f"{stk_chg:+.2f}%",
                         )
 
+
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def _theme_price_data(period_key):
     """全27テーマの代表銘柄をまとめて1回のfetch_pricesで取得する（内部用）。"""
@@ -864,6 +1077,40 @@ def compute_theme_ranking(period_key):
     return df
 
 
+def render_theme_heatmap(df):
+    """27テーマの騰落率を格子状のヒートマップで俯瞰できるようにする（棒グラフの補助表示）。"""
+    if df.empty:
+        return
+    ncols = 6
+    n = len(df)
+    nrows = -(-n // ncols)
+    nan = float("nan")
+    grid_z = [[nan for _ in range(ncols)] for _ in range(nrows)]
+    grid_text = [["" for _ in range(ncols)] for _ in range(nrows)]
+    for i, row in df.reset_index(drop=True).iterrows():
+        r, c = divmod(i, ncols)
+        grid_z[r][c] = row["騰落率"]
+        grid_text[r][c] = f"{row['テーマ名']}<br>{row['騰落率']:+.2f}%"
+
+    fig = px.imshow(
+        grid_z,
+        color_continuous_scale="RdYlGn",
+        color_continuous_midpoint=0,
+        aspect="auto",
+    )
+    fig.update_traces(text=grid_text, texttemplate="%{text}", textfont_size=11)
+    fig.update_layout(
+        template="plotly_dark",
+        height=60 * nrows + 40,
+        margin=dict(l=10, r=10, t=20, b=10),
+        paper_bgcolor="rgba(0,0,0,0)",
+        xaxis_visible=False,
+        yaxis_visible=False,
+        coloraxis_colorbar=dict(title="騰落率(%)"),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
 def render_theme_strength(period_key):
     """セクターより細かい「テーマ」単位（半導体・AIインフラなど）の強弱ランキングを、
     このダッシュボードの主役セクションとして表示する。各テーマは展開すると
@@ -904,6 +1151,9 @@ def render_theme_strength(period_key):
         "各テーマの代表銘柄（3〜5銘柄）の期間内騰落率を単純平均したスコアです。"
         "バーにカーソルを合わせると構成銘柄を確認できます。"
     )
+
+    st.markdown("**🟩🟥 ヒートマップ表示**")
+    render_theme_heatmap(df)
 
     st.caption("テーマごとの代表銘柄別スコアを見るには、下の項目をクリックして展開してください。")
     for _, row in df.iterrows():
@@ -1001,6 +1251,32 @@ def render_ark_trades():
                 )
 
 
+def _sec_13d_insight(rows):
+    """SEC Form 13Dの提出データから、簡単な傾向を機械的に読み取る。
+
+    AIによる分析ではなく、件数の集計・投資家名の重複チェックといった
+    機械的な処理だけで組み立てている点に注意。
+    """
+    if not rows:
+        return None
+    investor_counts = {}
+    for r in rows:
+        inv = r.get("投資家(提出者)", "-")
+        if inv and inv != "-":
+            investor_counts[inv] = investor_counts.get(inv, 0) + 1
+    repeat_investors = [inv for inv, c in investor_counts.items() if c > 1]
+
+    lines = [f"直近30日間で{len(rows)}件のSchedule 13D提出が確認されています。"]
+    if repeat_investors:
+        names = "、".join(repeat_investors[:3])
+        lines.append(f"「{names}」は複数の企業で新規5%超保有を提出しており、積極的な投資行動が見られます。")
+        confidence = "中"
+    else:
+        lines.append("今回は特筆すべき傾向（同一投資家による複数件の提出など）は見られません。")
+        confidence = "低"
+    return " ".join(lines), confidence
+
+
 def render_sec_13d():
     rows = get_sec_13d_filings()
     if rows is None:
@@ -1029,6 +1305,16 @@ def render_sec_13d():
             """,
             unsafe_allow_html=True,
         )
+
+    insight = _sec_13d_insight(rows)
+    if insight:
+        text, confidence = insight
+        st.markdown(
+            f'<div class="insight-box">{text}'
+            f'<span class="confidence-badge {_confidence_class(confidence)}">確度: {confidence}</span></div>',
+            unsafe_allow_html=True,
+        )
+
     st.caption("出典: SEC EDGAR Full Text Search (efts.sec.gov) ／ 米国政府の公開データです。")
 
 
@@ -1163,9 +1449,117 @@ def render_portfolio_holdings(period_key):
     return results
 
 
+def render_position_view(h, best_theme_row, tech, mentions, total_themes):
+    """「積み増し方向の材料」と「慎重方向の材料」を、既に持っている事実データから
+    機械的に両論併記する。断定的な結論（増やすべき/減らすべき）は書かない。
+    """
+    ticker = h["ticker"]
+    pros, cons = [], []
+
+    if best_theme_row is not None:
+        rank = int(best_theme_row["順位"])
+        if rank <= max(1, total_themes // 2):
+            pros.append(
+                f"所属テーマ「{best_theme_row['テーマ名']}」は本日{total_themes}テーマ中{rank}位と上位につけています（確度：中）。"
+            )
+        else:
+            cons.append(
+                f"所属テーマ「{best_theme_row['テーマ名']}」は本日{total_themes}テーマ中{rank}位と下位に位置しています（確度：中）。"
+            )
+
+    for m in mentions:
+        clean = m.split(" ", 1)[1] if " " in m else m
+        if "買い" in m:
+            pros.append(f"{clean}（確度：中）")
+        elif "売却" in m:
+            cons.append(f"{clean}（確度：中）")
+
+    if tech:
+        if tech.get("above_sma20") and tech.get("above_sma50"):
+            pros.append("テクニカル面では20日線・50日線ともに上に位置しており、短中期の上昇基調が続いているという見方もできます（確度：中）。")
+        if tech.get("below_sma20") and tech.get("below_sma50"):
+            cons.append("テクニカル面では20日線・50日線をともに下回っており、短中期の調整局面にあるという見方もできます（確度：中）。")
+        if tech.get("cross") == "ゴールデンクロス":
+            pros.append("直近でゴールデンクロス（20日線が50日線を上抜け）が発生しています（確度：中）。")
+        if tech.get("cross") == "デッドクロス":
+            cons.append("直近でデッドクロス（20日線が50日線を下抜け）が発生しています（確度：中）。")
+
+    if not pros:
+        pros.append("本日時点で、積み増し方向を積極的に裏付ける材料は特に見当たりませんでした（確度：低）。")
+    if not cons:
+        cons.append("本日時点で、慎重姿勢を積極的に裏付ける材料は特に見当たりませんでした（確度：低）。")
+
+    st.caption("⚠️ 以下は投資助言ではなく、公開情報を組み合わせた参考情報です。最終的な判断はご自身で行ってください。")
+    st.markdown(
+        f'<div class="fact-box"><b>[積み増し方向で見た場合の材料]</b> {" ".join(pros)}</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f'<div class="fact-box"><b>[慎重に見た場合の材料]</b> {" ".join(cons)}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def render_portfolio_expansion_view(holdings, period_key, commentary_data):
+    """現在の保有銘柄がカバーしていないテーマの中から、モメンタム・大口投資家の動き・
+    マクロ材料の重なりが強いものを1〜2個ピックアップして紹介する（銘柄の名指し推奨はしない）。
+    """
+    held_themes = set()
+    for h in holdings:
+        held_themes.update(_find_theme_for_ticker(resolve_analysis_ticker(h["ticker"])))
+
+    theme_df = compute_theme_ranking(period_key)
+    if theme_df.empty:
+        return
+
+    candidates = []
+    for _, row in theme_df.iterrows():
+        name = row["テーマ名"]
+        if name in held_themes:
+            continue
+        inst_hits = _theme_institutional_overlap(name)
+        macro_hits = _find_related_commentary(commentary_data, "", [name], None)
+        overlap = (1 if inst_hits else 0) + (1 if macro_hits else 0)
+        candidates.append((row, inst_hits, macro_hits, overlap))
+
+    if not candidates:
+        return
+
+    candidates.sort(key=lambda c: (-c[3], c[0]["順位"]))
+    picks = [c for c in candidates if c[3] > 0][:2]
+    if not picks:
+        picks = candidates[:1]
+
+    st.caption("⚠️ 以下は投資助言ではなく、公開情報を組み合わせた参考情報です。特定銘柄の売買を推奨するものではありません。")
+    for row, inst_hits, macro_hits, overlap in picks:
+        name = row["テーマ名"]
+        rank = int(row["順位"])
+        chg = row["騰落率"]
+        stocks = THEME_STOCKS.get(name, [])
+        example = "、".join(stocks[:3])
+        parts = [
+            f"「{name}」は本日{len(theme_df)}テーマ中{rank}位（平均騰落率 {chg:+.2f}%）と、モメンタムの強さが見られます。"
+        ]
+        if inst_hits:
+            parts.append("大口投資家の動きの中にも、このテーマの関連銘柄への言及が見られます。")
+        if macro_hits:
+            parts.append("本日の考察の中にも、このテーマに関連する言及があります。")
+        confidence = "中" if overlap > 0 else "低"
+        text = (
+            " ".join(parts)
+            + f" 現在の保有銘柄ではカバーされていないテーマです。テーマの代表銘柄の例：{example} など。"
+        )
+        st.markdown(
+            f'<div class="insight-box">{text}'
+            f'<span class="confidence-badge {_confidence_class(confidence)}">確度: {confidence}</span></div>',
+            unsafe_allow_html=True,
+        )
+
+
 def render_portfolio_assessment(holdings_with_price, period_key):
-    """保有銘柄ごとに、テーマ強弱ランキング・commentary.jsonの考察・大口投資家の動きを
-    突き合わせた「一つの見立て」を、既存の事実(水色)/考察(紫・確度バッジ)デザインで表示する。
+    """保有銘柄ごとに、テクニカル・テーマ/セクター・マクロ・ファンダメンタルズの4観点から
+    「見立て」を組み立て、既存の事実(水色)/考察(紫・確度バッジ)デザインで表示する。
+    続けて、ポジション調整の両論併記・ポートフォリオ強化のテーマ提案・日足チャートも表示する。
 
     これは投資助言ではなく、あくまで既に取得済みの公開情報を組み合わせて機械的に文章化した
     参考情報である。関連情報が見つからない銘柄については、その旨を正直に表示する。
@@ -1186,10 +1580,15 @@ def render_portfolio_assessment(holdings_with_price, period_key):
 
     for h in holdings_with_price:
         ticker = h["ticker"]
-        theme_names = _find_theme_for_ticker(ticker)
-        sector_name = _find_sector_for_ticker(ticker)
+        analysis_ticker = resolve_analysis_ticker(ticker)
+        is_alias = analysis_ticker != ticker
+        theme_names = _find_theme_for_ticker(analysis_ticker)
+        sector_name = _find_sector_for_ticker(analysis_ticker)
 
-        st.markdown(f"**📌 {ticker}**")
+        header = f"**📌 {ticker}**"
+        if is_alias:
+            header += f"　（レバレッジ型ETF等のため、分析は本体銘柄「{analysis_ticker}」換算）"
+        st.markdown(header)
 
         best_theme_row = None
         if theme_names and not theme_df.empty:
@@ -1197,39 +1596,65 @@ def render_portfolio_assessment(holdings_with_price, period_key):
             if not candidates.empty:
                 best_theme_row = candidates.sort_values("順位").iloc[0]
 
-        # --- 事実（ファクト）：テーマ／セクター分類とランキング、大口投資家の動き ---
-        facts = []
+        mentions = _find_institutional_mentions(analysis_ticker)
+
+        # --- a. テクニカル分析 ---
+        tech = compute_technical_view(analysis_ticker)
+        if tech:
+            st.markdown(f'<div class="fact-box"><b>[a. テクニカル]</b> {tech["text"]}</div>', unsafe_allow_html=True)
+        else:
+            st.markdown(
+                '<div class="fact-box"><b>[a. テクニカル]</b> データ不足のため判定できませんでした。</div>',
+                unsafe_allow_html=True,
+            )
+
+        # --- b. セクター/テーマの流れ ---
+        display_name = f"{ticker}（本体: {analysis_ticker}）" if is_alias else ticker
+        theme_facts = []
         if best_theme_row is not None:
-            facts.append(
-                f"{ticker}は「{best_theme_row['テーマ名']}」テーマに分類され、"
+            theme_facts.append(
+                f"{display_name}は「{best_theme_row['テーマ名']}」テーマに分類され、"
                 f"本日のテーマ強弱ランキングでは全{total_themes}テーマ中"
                 f"{int(best_theme_row['順位'])}位（平均騰落率 {best_theme_row['騰落率']:+.2f}%）です。"
             )
         if sector_name:
-            facts.append(f"伝統的な11セクター分類では「{sector_name}」セクターに属します。")
+            theme_facts.append(f"伝統的な11セクター分類では「{sector_name}」セクターに属します。")
         if h.get("period_chg") is not None:
-            facts.append(f"{ticker}自体の選択期間内の騰落率は {h['period_chg']:+.2f}% でした。")
+            theme_facts.append(f"{ticker}自体（保有している銘柄そのもの）の選択期間内の騰落率は {h['period_chg']:+.2f}% でした。")
+        theme_facts.extend(mentions)
+        if not theme_facts:
+            theme_facts.append(f"{display_name}について、本日時点でこのダッシュボードが把握している分類情報はありませんでした。")
+        st.markdown(
+            f'<div class="fact-box"><b>[b. テーマ/セクターの流れ]</b> {" ".join(theme_facts)}</div>',
+            unsafe_allow_html=True,
+        )
 
-        facts.extend(_find_institutional_mentions(ticker))
-
-        if not facts:
-            facts.append(f"{ticker}について、本日時点でこのダッシュボードが把握している分類情報はありませんでした。")
-
-        for fact in facts:
-            st.markdown(f'<div class="fact-box">{fact}</div>', unsafe_allow_html=True)
-
-        # --- 考察（インサイト）：commentary.jsonとの関連付け＋総合的な位置づけ ---
-        related = _find_related_commentary(commentary_data, ticker, theme_names, sector_name)
+        # --- c. マクロ要因（commentary.jsonとの関連付け） ---
+        related = _find_related_commentary(commentary_data, analysis_ticker, theme_names, sector_name)
         if related:
             for rel in related:
                 badge_cls = _confidence_class(rel["confidence"])
-                label = f"<b>[{rel['type']}] {rel['title']}</b><br>" if rel.get("title") else f"<b>[{rel['type']}]</b> "
+                label = f"<b>[c. マクロ] [{rel['type']}] {rel['title']}</b><br>" if rel.get("title") else f"<b>[c. マクロ] [{rel['type']}]</b> "
                 st.markdown(
                     f'<div class="insight-box">{label}{rel["text"]}'
                     f'<span class="confidence-badge {badge_cls}">確度: {rel["confidence"]}</span></div>',
                     unsafe_allow_html=True,
                 )
+        else:
+            st.markdown(
+                '<div class="insight-box"><b>[c. マクロ]</b> 本日はこの銘柄に関する直接的なマクロ材料が見当たりません。'
+                '<span class="confidence-badge confidence-low">確度: 低</span></div>',
+                unsafe_allow_html=True,
+            )
 
+        # --- d. ファンダメンタルズ ---
+        fundamentals_text = render_fundamentals_text(analysis_ticker)
+        st.markdown(
+            f'<div class="fact-box"><b>[d. ファンダメンタルズ]</b> {fundamentals_text}</div>',
+            unsafe_allow_html=True,
+        )
+
+        # --- 総合的な位置づけ ---
         if best_theme_row is not None:
             theme_chg = best_theme_row["騰落率"]
             stock_chg = h.get("period_chg")
@@ -1247,23 +1672,33 @@ def render_portfolio_assessment(holdings_with_price, period_key):
                 f'<span class="confidence-badge confidence-mid">確度: 中</span></div>',
                 unsafe_allow_html=True,
             )
-        elif not related:
-            st.markdown(
-                '<div class="insight-box">本日はこの銘柄に関する直接的な材料が見当たりません。'
-                '<span class="confidence-badge confidence-low">確度: 低</span></div>',
-                unsafe_allow_html=True,
-            )
+
+        # --- 日足チャート ---
+        chart_note = f"（本体銘柄「{analysis_ticker}」のチャートを表示）" if is_alias else ""
+        st.markdown(f"**📈 {ticker} 日足チャート（直近6ヶ月）**{chart_note}")
+        render_stock_chart(analysis_ticker)
+
+        # --- ポジション調整の両論併記 ---
+        st.markdown("**⚖️ ポジション調整に関する参考材料（両論併記）**")
+        render_position_view(h, best_theme_row, tech, mentions, total_themes)
 
         st.markdown("<hr style='border-color:#2a2f3d; margin: 8px 0 16px 0;'>", unsafe_allow_html=True)
+
+    # --- ポートフォリオ強化の考察（テーマ単位） ---
+    st.markdown("**🧭 ポートフォリオ強化の考察（テーマ単位）**")
+    render_portfolio_expansion_view(holdings_with_price, period_key, commentary_data)
 
     st.caption(disclaimer)
 
 
-def render_commentary():
+def render_commentary(period_key):
     """毎朝配信しているHTMLダッシュボードの考察(commentary.json)を表示する。
 
-    事実(facts)は水色系の枠、考察(insights)・注目テーマ(themes)は紫系の枠＋
-    確度バッジで視覚的に区別する。ファイルが取得できない場合は準備中と案内する。
+    事実(facts)は水色系の枠、考察(insights)は紫系の枠＋確度バッジで視覚的に区別する。
+    「今後の注目テーマ」は、強気（強い/資金が向かっている）・弱気（弱い/資金が抜けている）を
+    同じボリュームで併記する。commentary.json側に弱気テーマの記載がない場合は、
+    本日のテーマ強弱ランキング（下位テーマ）から機械的に弱気コメントを補って表示する。
+    ファイルが取得できない場合は準備中と案内する。
     """
     data = get_commentary()
     if not data or not isinstance(data, dict):
@@ -1310,10 +1745,18 @@ def render_commentary():
                 unsafe_allow_html=True,
             )
 
-    themes = data.get("themes", [])
-    if themes:
-        st.markdown("**🎯 今後の注目テーマ**")
-        for th in themes:
+    st.markdown("**🎯 今後の注目テーマ（強気・弱気）**")
+    bullish_curated, bearish_curated = classify_commentary_themes(data)
+    theme_df = compute_theme_ranking(period_key)
+    n_theme = len(theme_df)
+    top_n = theme_df.head(3) if not theme_df.empty else pd.DataFrame()
+    bottom_n = theme_df.tail(3) if not theme_df.empty else pd.DataFrame()
+    curated_titles = {th.get("title", "") for th in (bullish_curated + bearish_curated)}
+
+    col_bull, col_bear = st.columns(2)
+    with col_bull:
+        st.markdown("🟢 強気テーマ")
+        for th in bullish_curated:
             title = th.get("title", "")
             conf = th.get("confidence", "中")
             text = th.get("text", "")
@@ -1323,6 +1766,46 @@ def render_commentary():
                 f'<span class="confidence-badge {badge_cls}">確度: {conf}</span><br>{text}</div>',
                 unsafe_allow_html=True,
             )
+        for _, row in top_n.iterrows():
+            if row["テーマ名"] in curated_titles:
+                continue
+            st.markdown(
+                f'<div class="fact-box">「{row["テーマ名"]}」は本日のテーマ強弱ランキングで'
+                f'全{n_theme}テーマ中{int(row["順位"])}位（平均騰落率 {row["騰落率"]:+.2f}%）と'
+                f'上位につけています。</div>',
+                unsafe_allow_html=True,
+            )
+        if bullish_curated == [] and top_n.empty:
+            st.caption("本日、強気材料は見当たりませんでした。")
+
+    with col_bear:
+        st.markdown("🔴 弱気テーマ")
+        for th in bearish_curated:
+            title = th.get("title", "")
+            conf = th.get("confidence", "中")
+            text = th.get("text", "")
+            badge_cls = _confidence_class(conf)
+            st.markdown(
+                f'<div class="insight-box"><b>{title}</b>'
+                f'<span class="confidence-badge {badge_cls}">確度: {conf}</span><br>{text}</div>',
+                unsafe_allow_html=True,
+            )
+        for _, row in bottom_n.iterrows():
+            if row["テーマ名"] in curated_titles:
+                continue
+            st.markdown(
+                f'<div class="fact-box">「{row["テーマ名"]}」は本日のテーマ強弱ランキングで'
+                f'全{n_theme}テーマ中{int(row["順位"])}位（平均騰落率 {row["騰落率"]:+.2f}%）と'
+                f'下位に沈んでおり、資金が抜けている可能性があります。</div>',
+                unsafe_allow_html=True,
+            )
+        if bearish_curated == [] and bottom_n.empty:
+            st.caption("本日、弱気材料は見当たりませんでした。")
+
+    st.caption(
+        "※ 強気・弱気テーマは、commentary.jsonの記述と本日のテーマ強弱ランキング（上位/下位）を"
+        "組み合わせて機械的に整理したものです。"
+    )
 
     st.caption(
         "※ この考察セクションは、サイトがリアルタイムでニュースを分析しているわけではなく、"
@@ -1404,11 +1887,76 @@ def render_correlation(period_key):
     )
 
 
+def render_dashboard_page(period_key):
+    """「📊 分析ダッシュボード」ページ：市場全体の考察・指数・テーマ/セクター強弱・
+    大口投資家の動き・相関マトリクスをまとめて表示する。"""
+    st.title("📊 米国株 大口投資家動向・セクター強弱ダッシュボード")
+    st.caption("開くたびに最新データをその場で取得して表示します。")
+
+    st.markdown('<div class="section-title">🗞️ 今日の相場考察</div>', unsafe_allow_html=True)
+    render_commentary(period_key)
+
+    st.markdown('<div class="section-title">🧭 主要指数・資産</div>', unsafe_allow_html=True)
+    render_index_cards(period_key)
+
+    st.markdown('<div class="section-title">🎯 テーマ強弱ランキング</div>', unsafe_allow_html=True)
+    st.caption("半導体・AIインフラ・GLP-1など27テーマ単位の強弱ランキングです。各テーマを展開すると代表銘柄ごとのスコアも確認できます。")
+    render_theme_strength(period_key)
+
+    st.markdown('<div class="section-title">🏭 セクター強弱ランキング（参考情報）</div>', unsafe_allow_html=True)
+    st.caption("11セクターETF単位の、より粗い粒度のランキングです。参考情報として折りたたんでいます。")
+    if "show_sector_section" not in st.session_state:
+        st.session_state["show_sector_section"] = False
+    _sector_toggle_label = (
+        "▼ セクター強弱ランキングを閉じる"
+        if st.session_state["show_sector_section"]
+        else "▶ セクター強弱ランキングを表示する"
+    )
+    if st.button(_sector_toggle_label):
+        st.session_state["show_sector_section"] = not st.session_state["show_sector_section"]
+        st.rerun()
+    if st.session_state["show_sector_section"]:
+        render_sector_strength(period_key)
+
+    st.markdown('<div class="section-title">🏦 大口投資家の動き</div>', unsafe_allow_html=True)
+    st.caption("内部者クラスター買い・ARK Invest・SEC Form 13D・著名投資家(dataroma)の4つの情報源をタブで切り替えて確認できます。")
+    render_institutional_investors()
+
+    st.markdown('<div class="section-title">🔗 資産相関マトリクス</div>', unsafe_allow_html=True)
+    render_correlation(period_key)
+
+    st.markdown("---")
+    st.caption(
+        "⚠️ 本サイトは事実整理であり、投資助言ではありません。"
+        "個別銘柄の売買判断はご自身の責任で行ってください。"
+    )
+
+
+def render_portfolio_page(period_key):
+    """「📁 マイポートフォリオ」ページ：保有銘柄の登録・評価損益・4観点の見立て・
+    チャート・ポジション調整の参考材料・ポートフォリオ強化のテーマ提案を表示する。"""
+    st.title("📁 マイポートフォリオ")
+    st.caption("保有銘柄を登録すると、評価損益や複数の観点からの見立てが確認できます。")
+
+    init_portfolio_state()
+    render_portfolio_form()
+    st.markdown("**💰 保有状況**")
+    _portfolio_holdings = render_portfolio_holdings(period_key)
+    st.markdown("**🔍 見立て（テクニカル / テーマ・セクター / マクロ / ファンダメンタルズ）**")
+    render_portfolio_assessment(_portfolio_holdings, period_key)
+
+
 # =====================================================
 # サイドバー
 # =====================================================
 
 st.sidebar.title("⚙️ 設定")
+page = st.sidebar.radio(
+    "📌 ページ",
+    options=["📊 分析ダッシュボード", "📁 マイポートフォリオ"],
+    index=0,
+)
+st.sidebar.markdown("---")
 period_key = st.sidebar.selectbox(
     "📅 期間 (Focus Period)",
     options=list(PERIOD_OPTIONS.keys()),
@@ -1432,54 +1980,10 @@ st.sidebar.caption(
 
 
 # =====================================================
-# メイン画面
+# メイン画面（ページ切り替え）
 # =====================================================
 
-st.title("📊 米国株 大口投資家動向・セクター強弱ダッシュボード")
-st.caption("開くたびに最新データをその場で取得して表示します。")
-
-st.markdown('<div class="section-title">🗞️ 今日の相場考察</div>', unsafe_allow_html=True)
-render_commentary()
-
-st.markdown('<div class="section-title">🧭 主要指数・資産</div>', unsafe_allow_html=True)
-render_index_cards(period_key)
-
-st.markdown('<div class="section-title">🎯 テーマ強弱ランキング</div>', unsafe_allow_html=True)
-st.caption("半導体・AIインフラ・GLP-1など27テーマ単位の強弱ランキングです。各テーマを展開すると代表銘柄ごとのスコアも確認できます。")
-render_theme_strength(period_key)
-
-st.markdown('<div class="section-title">🏭 セクター強弱ランキング（参考情報）</div>', unsafe_allow_html=True)
-st.caption("11セクターETF単位の、より粗い粒度のランキングです。参考情報として折りたたんでいます。")
-if "show_sector_section" not in st.session_state:
-    st.session_state["show_sector_section"] = False
-_sector_toggle_label = (
-    "▼ セクター強弱ランキングを閉じる"
-    if st.session_state["show_sector_section"]
-    else "▶ セクター強弱ランキングを表示する"
-)
-if st.button(_sector_toggle_label):
-    st.session_state["show_sector_section"] = not st.session_state["show_sector_section"]
-    st.rerun()
-if st.session_state["show_sector_section"]:
-    render_sector_strength(period_key)
-
-st.markdown('<div class="section-title">📁 マイポートフォリオ</div>', unsafe_allow_html=True)
-init_portfolio_state()
-render_portfolio_form()
-st.markdown("**💰 保有状況**")
-_portfolio_holdings = render_portfolio_holdings(period_key)
-st.markdown("**🔍 見立て**")
-render_portfolio_assessment(_portfolio_holdings, period_key)
-
-st.markdown('<div class="section-title">🏦 大口投資家の動き</div>', unsafe_allow_html=True)
-st.caption("内部者クラスター買い・ARK Invest・SEC Form 13D・著名投資家(dataroma)の4つの情報源をタブで切り替えて確認できます。")
-render_institutional_investors()
-
-st.markdown('<div class="section-title">🔗 資産相関マトリクス</div>', unsafe_allow_html=True)
-render_correlation(period_key)
-
-st.markdown("---")
-st.caption(
-    "⚠️ 本サイトは事実整理であり、投資助言ではありません。"
-    "個別銘柄の売買判断はご自身の責任で行ってください。"
-)
+if page == "📊 分析ダッシュボード":
+    render_dashboard_page(period_key)
+else:
+    render_portfolio_page(period_key)
