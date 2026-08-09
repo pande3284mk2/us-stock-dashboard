@@ -7,16 +7,17 @@
 サイトを開くたびに、その場で最新の株式データを取得して表示します。
 
 含まれる機能:
-  0. サイドバーでのページ切り替え（📊 分析ダッシュボード ／ 📁 マイポートフォリオ）
-  1. 主要指数カード（ダウ30・S&P500・ナスダック100・ビットコイン・金）
+  0. サイドバーでのページ切り替え（📊 分析ダッシュボード ／ 📁 マイポートフォリオ ／ 📰 ニュースアーカイブ）
+  1. 主要指数カード（ダウ30・S&P500・ナスダック100・ビットコイン・金、ページ最上部）
   2. テーマ強弱ランキング（半導体・AIインフラなど27テーマの騰落率、代表銘柄スコア＋ヒートマップ）
   3. セクター強弱ランキング（11セクターETFの騰落率・参考情報として折りたたみ表示）
-  4. 本日の相場考察（強気テーマ／弱気テーマを同ボリュームで併記）
-  5. マイポートフォリオ（保有銘柄の登録・評価損益・4観点の見立て・日足チャート・
-     ポジション調整の両論併記・ポートフォリオ強化のテーマ提案）
-  6. 大口投資家の動き（内部者クラスター買い / ARK Invest / SEC Form 13D / dataroma.com）
+  4. 本日の相場考察（強気テーマ／弱気テーマを同ボリュームで併記、関連ニュースへの導線付き）
+  5. マイポートフォリオ（保有銘柄の登録・預り金・評価損益の円換算・4観点の見立て・日足チャート・
+     ポジション調整の両論併記・ポートフォリオ強化のテーマ提案・追加投資を検討する場合の考察）
+  6. 大口投資家の動き（ARK Invest / 内部者クラスター買い / SEC Form 13D / dataroma.com）
   7. 資産相関マトリクス（主要資産の値動きの相関）
   8. 期間セレクター（1日 / 1週間 / 1ヶ月）
+  9. ニュースアーカイブ（Google Newsのリアルタイム簡易ニュース＋日次蓄積のニュースアーカイブ）
 
 本サイトは事実整理であり、投資助言ではありません。
 """
@@ -24,7 +25,9 @@
 import base64
 import json
 import re
+import time
 import warnings
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -279,6 +282,16 @@ COMMENTARY_URL = (
     "https://raw.githubusercontent.com/pande3284mk2/us-stock-dashboard/main/commentary.json"
 )
 
+# 日次の自動更新タスク側で厳選・蓄積していくニュースアーカイブ（このアプリ自体は書き込みは行わず、
+# 読み込んで一覧表示するだけ）。まだファイルが存在しない場合はNoneを返し、画面側でフォールバック表示する。
+NEWS_ARCHIVE_URL = (
+    "https://raw.githubusercontent.com/pande3284mk2/us-stock-dashboard/main/news_archive.json"
+)
+
+# 「📰 ニュースアーカイブ」ページのリアルタイム簡易ニュースで検索する経済関連キーワード。
+# Google Newsの検索RSS（アカウント登録・APIキー不要・無料）を利用する。
+NEWS_KEYWORDS = ["FRB", "利下げ", "半導体", "決算", "関税"]
+
 # 期間セレクターの選択肢
 # yf_period   : 騰落率計算に必要な株価データを取得する期間
 # lookback    : 何営業日前と比較して騰落率を計算するか
@@ -346,6 +359,23 @@ def _extract_close(price_data, ticker):
         return None
 
 
+def _http_get_with_retry(url, headers=None, timeout=25, retries=3, backoff=1.5):
+    """一時的な混雑やタイムアウトに強くするため、GETリクエストを指数バックオフ付きで
+    最大retries回まで試行する共通ヘルパー。openinsider.com や dataroma.com のような
+    小規模サイトは、一時的な負荷やアクセス集中で単発のリクエストが失敗しやすいための対策。
+    全て失敗した場合はNoneを返す。
+    """
+    for attempt in range(retries):
+        try:
+            resp = requests.get(url, headers=headers, timeout=timeout)
+            resp.raise_for_status()
+            return resp
+        except Exception:
+            if attempt < retries - 1:
+                time.sleep(backoff * (attempt + 1))
+    return None
+
+
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def get_cluster_buys():
     """openinsider.com の「クラスター買い」ページから、
@@ -354,17 +384,20 @@ def get_cluster_buys():
     「売り」は10b5-1プラン（あらかじめ決めたスケジュールでの機械的売却）が
     多く含まれ、経営陣の相場観を反映しないことが多いため、原則として除外する。
     """
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9,ja;q=0.8",
+        "Referer": "http://openinsider.com/",
+    }
+    resp = _http_get_with_retry(OPENINSIDER_URL, headers=headers)
+    if resp is None:
+        return None
     try:
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            )
-        }
-        resp = requests.get(OPENINSIDER_URL, headers=headers, timeout=20)
-        resp.raise_for_status()
-
         try:
             tables = pd.read_html(resp.text)
         except ValueError:
@@ -503,17 +536,20 @@ def get_dataroma_highlights():
     データの一括転載・再配布は禁止されている。そのため本アプリでは、全件ではなく
     上位5件だけを出典リンク付きで表示する（過度なスクレイピングを避けるための意図的な制限）。
     """
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9,ja;q=0.8",
+        "Referer": "https://www.dataroma.com/",
+    }
+    resp = _http_get_with_retry(DATAROMA_URL, headers=headers)
+    if resp is None:
+        return None
     try:
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            )
-        }
-        resp = requests.get(DATAROMA_URL, headers=headers, timeout=20)
-        resp.raise_for_status()
-
         try:
             tables = pd.read_html(resp.text)
         except ValueError:
@@ -546,6 +582,56 @@ def get_commentary():
         resp = requests.get(COMMENTARY_URL, timeout=15)
         resp.raise_for_status()
         return resp.json()
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def get_realtime_news(keywords=None, max_per_keyword=5):
+    """Google Newsの検索RSS（アカウント登録・APIキー不要・無料）から、
+    経済関連キーワードに関する直近のニュース見出しを取得する。
+
+    RSSのパースはPython標準ライブラリのxml.etreeのみを使用し、
+    追加の外部ライブラリ（feedparser等）には依存しない実装にしている。
+    """
+    keywords = keywords or NEWS_KEYWORDS
+    headers = {"User-Agent": SEC_USER_AGENT}
+    results = []
+    for kw in keywords:
+        try:
+            url = (
+                "https://news.google.com/rss/search?q="
+                f"{requests.utils.quote(kw)}&hl=ja&gl=JP&ceid=JP:ja"
+            )
+            resp = requests.get(url, headers=headers, timeout=15)
+            resp.raise_for_status()
+            root = ET.fromstring(resp.content)
+            items = root.findall("./channel/item")[:max_per_keyword]
+            for item in items:
+                title = item.findtext("title") or ""
+                link = item.findtext("link") or ""
+                pub_date = item.findtext("pubDate") or ""
+                results.append(
+                    {"keyword": kw, "title": title, "link": link, "published": pub_date}
+                )
+        except Exception:
+            continue
+    return results
+
+
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def get_news_archive():
+    """GitHubリポジトリ直下の news_archive.json（日次の自動更新タスク側で厳選・蓄積していく
+    ニュースアーカイブ）を取得する。このアプリ自体は書き込みは行わず、読み込んで一覧表示するだけ。
+    ファイルがまだ存在しない場合や取得に失敗した場合はNoneを返し、画面側でフォールバック表示する。
+    """
+    try:
+        resp = requests.get(NEWS_ARCHIVE_URL, timeout=15)
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("entries", [])
     except Exception:
         return None
 
@@ -583,7 +669,7 @@ def load_portfolio_from_github():
     try:
         resp = requests.get(GITHUB_PORTFOLIO_API_URL, headers=_github_headers(), timeout=15)
         if resp.status_code == 404:
-            return {"holdings": [], "updated_at": None}
+            return {"holdings": [], "cash_jpy": 0, "updated_at": None}
         resp.raise_for_status()
         data = resp.json()
         content_b64 = data.get("content", "")
@@ -591,13 +677,15 @@ def load_portfolio_from_github():
         portfolio = json.loads(decoded)
         if "holdings" not in portfolio:
             portfolio["holdings"] = []
+        if "cash_jpy" not in portfolio:
+            portfolio["cash_jpy"] = 0
         return portfolio
     except Exception:
-        return {"holdings": [], "updated_at": None}
+        return {"holdings": [], "cash_jpy": 0, "updated_at": None}
 
 
-def save_portfolio_to_github(holdings):
-    """保有銘柄リストを portfolio.json としてGitHubリポジトリに保存する。
+def save_portfolio_to_github(holdings, cash_jpy=0.0):
+    """保有銘柄リストと預り金（現金、円建て）を portfolio.json としてGitHubリポジトリに保存する。
 
     GitHub Contents APIの仕様上、既存ファイルを更新する場合は現在のsha（版を示す識別子）
     を事前に取得してPUTリクエストに含める必要があるため、
@@ -614,6 +702,7 @@ def save_portfolio_to_github(holdings):
 
         payload_dict = {
             "holdings": holdings,
+            "cash_jpy": cash_jpy,
             "updated_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
         content_str = json.dumps(payload_dict, ensure_ascii=False, indent=2)
@@ -656,6 +745,7 @@ def init_portfolio_state():
             st.session_state[f"pf_ticker_{i}"] = ""
             st.session_state[f"pf_shares_{i}"] = 0.0
             st.session_state[f"pf_cost_{i}"] = 0.0
+    st.session_state["pf_cash_jpy"] = float(data.get("cash_jpy", 0) or 0)
     st.session_state["portfolio_loaded"] = True
 
 
@@ -670,6 +760,11 @@ def _current_portfolio_holdings():
         if ticker and shares > 0:
             holdings.append({"ticker": ticker, "shares": shares, "cost_basis": cost})
     return holdings
+
+
+def _current_cash_jpy():
+    """入力フォーム（st.session_state）から、預り金（投資に使っていない現金、円建て）を取り出す。"""
+    return st.session_state.get("pf_cash_jpy", 0.0) or 0.0
 
 
 def _find_theme_for_ticker(ticker):
@@ -766,6 +861,20 @@ def get_stock_history(ticker, period="6mo"):
         return hist
     except Exception:
         return pd.DataFrame()
+
+
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def get_usdjpy_rate():
+    """USDJPY=X（相関マトリクスと同じyfinanceティッカー）から、直近のドル円レートを取得する。
+    ポートフォリオの評価損益を円換算表示するために使う。取得できない場合はNoneを返す。
+    """
+    try:
+        hist = yf.Ticker("USDJPY=X").history(period="5d", interval="1d")
+        if hist is None or hist.empty:
+            return None
+        return float(hist["Close"].dropna().iloc[-1])
+    except Exception:
+        return None
 
 
 def compute_technical_view(ticker):
@@ -1078,19 +1187,20 @@ def compute_theme_ranking(period_key):
 
 
 def render_theme_heatmap(df):
-    """27テーマの騰落率を格子状のヒートマップで俯瞰できるようにする（棒グラフの補助表示）。"""
+    """27テーマの騰落率をヒートマップで俯瞰できるようにする（棒グラフの補助表示）。
+
+    スマホ等の狭い画面幅でもラベル文字が重ならないよう、テーマを横方向に複数列並べる
+    格子状レイアウトはやめ、縦1列のリスト型（y軸にテーマ名、x軸は「スコア」1列だけ）に
+    している。横幅に依存しないため、画面幅が375px程度のスマホでも文字が重ならない。
+    """
     if df.empty:
         return
-    ncols = 6
-    n = len(df)
-    nrows = -(-n // ncols)
-    nan = float("nan")
-    grid_z = [[nan for _ in range(ncols)] for _ in range(nrows)]
-    grid_text = [["" for _ in range(ncols)] for _ in range(nrows)]
-    for i, row in df.reset_index(drop=True).iterrows():
-        r, c = divmod(i, ncols)
-        grid_z[r][c] = row["騰落率"]
-        grid_text[r][c] = f"{row['テーマ名']}<br>{row['騰落率']:+.2f}%"
+    df_sorted = df.reset_index(drop=True)
+    n = len(df_sorted)
+    grid_z = [[row["騰落率"]] for _, row in df_sorted.iterrows()]
+    grid_text = [
+        [f"{row['テーマ名']}　{row['騰落率']:+.2f}%"] for _, row in df_sorted.iterrows()
+    ]
 
     fig = px.imshow(
         grid_z,
@@ -1098,10 +1208,14 @@ def render_theme_heatmap(df):
         color_continuous_midpoint=0,
         aspect="auto",
     )
-    fig.update_traces(text=grid_text, texttemplate="%{text}", textfont_size=11)
+    fig.update_traces(
+        text=grid_text,
+        texttemplate="%{text}",
+        textfont_size=12,
+    )
     fig.update_layout(
         template="plotly_dark",
-        height=60 * nrows + 40,
+        height=26 * n + 40,
         margin=dict(l=10, r=10, t=20, b=10),
         paper_bgcolor="rgba(0,0,0,0)",
         xaxis_visible=False,
@@ -1339,14 +1453,16 @@ def render_dataroma_highlights():
 
 
 def render_institutional_investors():
-    """「大口投資家の動き」を、4つの情報源をタブで切り替えて俯瞰できるようにする。"""
+    """「大口投資家の動き」を、4つの情報源をタブで切り替えて俯瞰できるようにする。
+    最も取得が安定しているARK Investを先頭タブにしている。
+    """
     tab1, tab2, tab3, tab4 = st.tabs(
-        ["🕵️ 内部者クラスター買い", "🚀 ARK Invest", "📜 SEC Form 13D", "💎 著名投資家(Dataroma)"]
+        ["🚀 ARK Invest", "🕵️ 内部者クラスター買い", "📜 SEC Form 13D", "💎 著名投資家(Dataroma)"]
     )
     with tab1:
-        render_cluster_buys()
-    with tab2:
         render_ark_trades()
+    with tab2:
+        render_cluster_buys()
     with tab3:
         render_sec_13d()
     with tab4:
@@ -1382,9 +1498,19 @@ def render_portfolio_form():
                 format="%.2f",
             )
 
+    st.number_input(
+        "💰 預り金（円）— 投資に使っていない現金",
+        key="pf_cash_jpy",
+        min_value=0.0,
+        step=10000.0,
+        format="%.0f",
+        help="株式等に投資していない現金の金額を円建てで入力してください。",
+    )
+
     if st.button("💾 保存する"):
         holdings = _current_portfolio_holdings()
-        ok, err = save_portfolio_to_github(holdings)
+        cash_jpy = _current_cash_jpy()
+        ok, err = save_portfolio_to_github(holdings, cash_jpy)
         if ok:
             st.success("✅ ポートフォリオをGitHubに保存しました。次回このアプリを開いた時にも復元されます。")
         else:
@@ -1392,9 +1518,13 @@ def render_portfolio_form():
 
 
 def render_portfolio_holdings(period_key):
-    """保有銘柄それぞれについて、現在値・評価損益（金額／％）を計算して表示する。
+    """保有銘柄それぞれについて、現在値・評価損益（金額／％、USD建てと円換算の併記）を計算して表示する。
     次の「見立て」コーナーで使うため、各銘柄の現在値・期間内騰落率も含めて返す。
     """
+    cash_jpy = _current_cash_jpy()
+    if cash_jpy > 0:
+        st.metric("💰 預り金（円）", f"¥{cash_jpy:,.0f}")
+
     holdings = _current_portfolio_holdings()
     if not holdings:
         st.info("📭 保有銘柄が登録されていません。上のフォームから入力して保存してください。")
@@ -1403,6 +1533,7 @@ def render_portfolio_holdings(period_key):
     cfg = PERIOD_OPTIONS[period_key]
     tickers = [h["ticker"] for h in holdings]
     price_data = fetch_prices(tuple(tickers), cfg["yf_period"])
+    usdjpy_rate = get_usdjpy_rate()
 
     results = []
     for h in holdings:
@@ -1432,9 +1563,13 @@ def render_portfolio_holdings(period_key):
                     delta=f"{period_chg:+.2f}%" if period_chg is not None else None,
                 )
             with cols[3]:
+                pl_value_text = f"${pl_amount:,.2f}"
+                if usdjpy_rate:
+                    pl_amount_jpy = pl_amount * usdjpy_rate
+                    pl_value_text += f"（約{pl_amount_jpy / 10000:+.1f}万円）"
                 st.metric(
                     "評価損益",
-                    f"${pl_amount:,.2f}",
+                    pl_value_text,
                     delta=f"{pl_pct:+.2f}%" if pl_pct is not None else None,
                 )
 
@@ -1500,9 +1635,9 @@ def render_position_view(h, best_theme_row, tech, mentions, total_themes):
     )
 
 
-def render_portfolio_expansion_view(holdings, period_key, commentary_data):
-    """現在の保有銘柄がカバーしていないテーマの中から、モメンタム・大口投資家の動き・
-    マクロ材料の重なりが強いものを1〜2個ピックアップして紹介する（銘柄の名指し推奨はしない）。
+def _pick_expansion_theme_candidates(holdings, period_key, commentary_data):
+    """保有銘柄がカバーしていないテーマの中から、モメンタム・大口投資家の動き・マクロ材料の
+    重なりが強いものを1〜2個ピックアップする（内部用のヘルパー。複数箇所から再利用する）。
     """
     held_themes = set()
     for h in holdings:
@@ -1510,7 +1645,7 @@ def render_portfolio_expansion_view(holdings, period_key, commentary_data):
 
     theme_df = compute_theme_ranking(period_key)
     if theme_df.empty:
-        return
+        return [], theme_df
 
     candidates = []
     for _, row in theme_df.iterrows():
@@ -1523,14 +1658,19 @@ def render_portfolio_expansion_view(holdings, period_key, commentary_data):
         candidates.append((row, inst_hits, macro_hits, overlap))
 
     if not candidates:
-        return
+        return [], theme_df
 
     candidates.sort(key=lambda c: (-c[3], c[0]["順位"]))
     picks = [c for c in candidates if c[3] > 0][:2]
     if not picks:
         picks = candidates[:1]
+    return picks, theme_df
 
-    st.caption("⚠️ 以下は投資助言ではなく、公開情報を組み合わせた参考情報です。特定銘柄の売買を推奨するものではありません。")
+
+def _render_expansion_picks(picks, theme_df):
+    """_pick_expansion_theme_candidates()のピックアップ結果を、確度バッジ付きの
+    insight-boxとして表示する（内部用のヘルパー）。
+    """
     for row, inst_hits, macro_hits, overlap in picks:
         name = row["テーマ名"]
         rank = int(row["順位"])
@@ -1552,6 +1692,120 @@ def render_portfolio_expansion_view(holdings, period_key, commentary_data):
         st.markdown(
             f'<div class="insight-box">{text}'
             f'<span class="confidence-badge {_confidence_class(confidence)}">確度: {confidence}</span></div>',
+            unsafe_allow_html=True,
+        )
+
+
+def render_portfolio_expansion_view(holdings, period_key, commentary_data):
+    """現在の保有銘柄がカバーしていないテーマの中から、モメンタム・大口投資家の動き・
+    マクロ材料の重なりが強いものを1〜2個ピックアップして紹介する（銘柄の名指し推奨はしない）。
+    """
+    picks, theme_df = _pick_expansion_theme_candidates(holdings, period_key, commentary_data)
+    if not picks:
+        return
+    st.caption("⚠️ 以下は投資助言ではなく、公開情報を組み合わせた参考情報です。特定銘柄の売買を推奨するものではありません。")
+    _render_expansion_picks(picks, theme_df)
+
+
+def render_investment_consideration(holdings_with_price, period_key, commentary_data, cash_jpy, usdjpy_rate):
+    """預り金（現金）と現在の保有状況を踏まえて、「もし追加投資を検討するなら」という
+    一つの考察例を、a. 追加投入する場合／b. 利益確定・縮小する場合／c. 新規テーマへの配分、
+    という3つの観点から機械的に整理する。
+
+    「〜すべき」という断定や一人称での推奨は行わず、あくまで複数の見方を事実ベースで
+    提示するだけである点に注意（両論併記のrender_position_viewと同じ設計思想）。
+    """
+    st.caption(
+        "⚠️ これは投資助言ではありません。以下は公開情報を組み合わせた一つの考察例であり、"
+        "実際の投資判断はご自身の責任で行ってください。"
+    )
+    if cash_jpy <= 0 and not holdings_with_price:
+        st.info("預り金・保有銘柄がいずれも登録されていないため、この考察は表示できません。")
+        return
+
+    theme_df = compute_theme_ranking(period_key)
+    total_themes = len(theme_df)
+
+    holding_theme_rows = []
+    for h in holdings_with_price:
+        analysis_ticker = resolve_analysis_ticker(h["ticker"])
+        theme_names = _find_theme_for_ticker(analysis_ticker)
+        if theme_names and not theme_df.empty:
+            cand = theme_df[theme_df["テーマ名"].isin(theme_names)]
+            if not cand.empty:
+                holding_theme_rows.append((h, cand.sort_values("順位").iloc[0]))
+    holding_theme_rows.sort(key=lambda x: x[1]["順位"])
+
+    # --- a. 預り金を今のポジションに追加投入する場合の考え方 ---
+    st.markdown("**a. 預り金を今のポジションに追加投入する場合の考え方**")
+    if cash_jpy > 0:
+        cash_note = f"現在登録されている預り金は約{cash_jpy:,.0f}円です。"
+        if usdjpy_rate:
+            cash_note += f"（1ドル={usdjpy_rate:,.2f}円換算で約${cash_jpy / usdjpy_rate:,.2f}相当）"
+    else:
+        cash_note = "現在、預り金は登録されていません。"
+
+    if holding_theme_rows:
+        top_h, top_row = holding_theme_rows[0]
+        text_a = (
+            f"{cash_note} 保有銘柄の中では「{top_h['ticker']}」が属する「{top_row['テーマ名']}」テーマが"
+            f"本日{total_themes}テーマ中{int(top_row['順位'])}位と相対的に強く、"
+            "一つの考え方として、既存ポジションに資金を追加する対象として着目することもできます。"
+        )
+        conf_a = "中"
+    else:
+        text_a = f"{cash_note} ただし、テーマの強弱を判定できる保有銘柄が見当たらないため、この観点からの具体的な材料は挙げられません。"
+        conf_a = "低"
+    st.markdown(
+        f'<div class="insight-box">{text_a}'
+        f'<span class="confidence-badge {_confidence_class(conf_a)}">確度: {conf_a}</span></div>',
+        unsafe_allow_html=True,
+    )
+
+    # --- b. 一部を利益確定・縮小する場合の考え方 ---
+    st.markdown("**b. 一部を利益確定・縮小する場合の考え方**")
+    parts_b = []
+    gain_candidates = [
+        (h["ticker"], (h["current_price"] / h["cost_basis"] - 1) * 100)
+        for h in holdings_with_price
+        if h.get("current_price") is not None and h.get("cost_basis")
+    ]
+    if gain_candidates:
+        gain_candidates.sort(key=lambda x: -x[1])
+        top_gain_ticker, top_gain_pct = gain_candidates[0]
+        if top_gain_pct > 0:
+            parts_b.append(
+                f"「{top_gain_ticker}」は含み益が{top_gain_pct:+.1f}%と大きく、"
+                "利益確定や一部縮小を検討する視点もあります。"
+            )
+    lagging = [x for x in holding_theme_rows if x[1]["順位"] > max(1, total_themes // 2)]
+    if lagging:
+        lag_h, lag_row = lagging[-1]
+        parts_b.append(
+            f"「{lag_h['ticker']}」が属する「{lag_row['テーマ名']}」テーマは"
+            f"本日{total_themes}テーマ中{int(lag_row['順位'])}位と勢いが鈍化しており、"
+            "こちらも縮小方向の一つの材料として見ることもできます。"
+        )
+    if parts_b:
+        text_b = " ".join(parts_b)
+        conf_b = "中"
+    else:
+        text_b = "本日時点で、利益確定や縮小を積極的に裏付ける材料は特に見当たりませんでした。"
+        conf_b = "低"
+    st.markdown(
+        f'<div class="insight-box">{text_b}'
+        f'<span class="confidence-badge {_confidence_class(conf_b)}">確度: {conf_b}</span></div>',
+        unsafe_allow_html=True,
+    )
+
+    # --- c. 新しいテーマ・銘柄に配分する場合の考え方 ---
+    st.markdown("**c. 新しいテーマ・銘柄に配分する場合の考え方**")
+    picks, exp_theme_df = _pick_expansion_theme_candidates(holdings_with_price, period_key, commentary_data)
+    if picks:
+        _render_expansion_picks(picks, exp_theme_df)
+    else:
+        st.markdown(
+            '<div class="fact-box">本日時点で、新規配分先として紹介できる候補テーマは見当たりませんでした。</div>',
             unsafe_allow_html=True,
         )
 
@@ -1718,17 +1972,21 @@ def render_commentary(period_key):
 
     facts = data.get("facts", [])
     if facts:
-        st.markdown("**🔵 事実（ファクト）**")
+        st.markdown("**🔵 事実（ファクト・テーマ単位の動きを中心に記載）**")
         for f in facts:
             text = f.get("text", "")
+            cause = f.get("cause")
             src = f.get("source_url")
+            cause_html = (
+                f'<br><span class="small-note">💡 要因: {cause}</span>' if cause else ""
+            )
             src_html = (
                 f' <a href="{src}" target="_blank" style="color:#7dd3fc;">[出典]</a>'
                 if src
                 else ""
             )
             st.markdown(
-                f'<div class="fact-box">{text}{src_html}</div>',
+                f'<div class="fact-box">{text}{cause_html}{src_html}</div>',
                 unsafe_allow_html=True,
             )
 
@@ -1887,17 +2145,103 @@ def render_correlation(period_key):
     )
 
 
+def render_recent_news_widget():
+    """news_archive.json（蓄積ニュースアーカイブ）の直近数件を、ダッシュボードの
+    「本日の考察」セクション付近に簡単なリスト形式で表示する。まだファイルが無い場合や
+    取得に失敗した場合は、エラーにせず何も表示しない（詳細はニュースアーカイブページを参照）。
+    """
+    entries = get_news_archive()
+    if not entries:
+        return
+    st.markdown("**📰 関連ニュース**")
+    sorted_entries = sorted(entries, key=lambda e: e.get("date", ""), reverse=True)[:3]
+    for e in sorted_entries:
+        headline = e.get("headline", "")
+        date_str = e.get("date", "")
+        src = e.get("source_url")
+        link_html = (
+            f' <a href="{src}" target="_blank" style="color:#7dd3fc;">[出典]</a>' if src else ""
+        )
+        st.markdown(f"- {date_str}　{headline}{link_html}", unsafe_allow_html=True)
+    st.caption("詳しくは「📰 ニュースアーカイブ」ページをご覧ください。")
+
+
+def render_news_archive_page():
+    """「📰 ニュースアーカイブ」ページ：Google Newsのリアルタイム簡易ニュースと、
+    日次の自動更新タスク側で厳選・蓄積しているニュースアーカイブをまとめて表示する。
+    """
+    st.title("📰 ニュースアーカイブ")
+    st.caption("経済ニュースのリアルタイム簡易検索と、日次で厳選・蓄積しているニュースアーカイブをまとめて確認できます。")
+
+    st.markdown('<div class="section-title">🔴 リアルタイム簡易ニュース</div>', unsafe_allow_html=True)
+    st.caption(
+        "Google Newsの検索RSS（アカウント登録・APIキー不要・無料）から、"
+        "「FRB」「利下げ」「半導体」「決算」「関税」等の経済関連キーワードで直近ニュースを取得しています。"
+    )
+    news_items = get_realtime_news()
+    if not news_items:
+        st.info("😔 リアルタイムニュースを取得できませんでした。しばらく待ってから再度お試しください。")
+    else:
+        by_keyword = {}
+        for item in news_items:
+            by_keyword.setdefault(item["keyword"], []).append(item)
+        for kw, items in by_keyword.items():
+            with st.expander(f"🔎 「{kw}」関連ニュース（{len(items)}件）"):
+                for it in items:
+                    link_html = (
+                        f' <a href="{it["link"]}" target="_blank" style="color:#7dd3fc;">[記事]</a>'
+                        if it.get("link")
+                        else ""
+                    )
+                    st.markdown(
+                        f'<div class="fact-box">{it["title"]}{link_html}<br>'
+                        f'<span class="small-note">{it.get("published", "")}</span></div>',
+                        unsafe_allow_html=True,
+                    )
+
+    st.markdown('<div class="section-title">🗂️ 蓄積ニュースアーカイブ</div>', unsafe_allow_html=True)
+    st.caption("日次の自動更新タスクで、重要と判断されたニュースを厳選して積み上げているアーカイブです。")
+    entries = get_news_archive()
+    if not entries:
+        st.info("📭 まだ蓄積されたニュースがありません。")
+        return
+
+    by_date = {}
+    for e in entries:
+        d = e.get("date", "不明")
+        by_date.setdefault(d, []).append(e)
+    for d in sorted(by_date.keys(), reverse=True):
+        st.markdown(f"**📅 {d}**")
+        for e in by_date[d]:
+            headline = e.get("headline", "")
+            summary = e.get("summary", "")
+            themes = e.get("relevance_themes", [])
+            src = e.get("source_url")
+            theme_tags = "　".join(f"#{t}" for t in themes) if themes else ""
+            src_html = (
+                f' <a href="{src}" target="_blank" style="color:#7dd3fc;">[出典]</a>' if src else ""
+            )
+            tags_html = (
+                f'<br><span class="small-note">{theme_tags}</span>' if theme_tags else ""
+            )
+            st.markdown(
+                f'<div class="fact-box"><b>{headline}</b>{src_html}<br>{summary}{tags_html}</div>',
+                unsafe_allow_html=True,
+            )
+
+
 def render_dashboard_page(period_key):
     """「📊 分析ダッシュボード」ページ：市場全体の考察・指数・テーマ/セクター強弱・
     大口投資家の動き・相関マトリクスをまとめて表示する。"""
     st.title("📊 米国株 大口投資家動向・セクター強弱ダッシュボード")
     st.caption("開くたびに最新データをその場で取得して表示します。")
 
-    st.markdown('<div class="section-title">🗞️ 今日の相場考察</div>', unsafe_allow_html=True)
-    render_commentary(period_key)
-
     st.markdown('<div class="section-title">🧭 主要指数・資産</div>', unsafe_allow_html=True)
     render_index_cards(period_key)
+
+    st.markdown('<div class="section-title">🗞️ 今日の相場考察</div>', unsafe_allow_html=True)
+    render_commentary(period_key)
+    render_recent_news_widget()
 
     st.markdown('<div class="section-title">🎯 テーマ強弱ランキング</div>', unsafe_allow_html=True)
     st.caption("半導体・AIインフラ・GLP-1など27テーマ単位の強弱ランキングです。各テーマを展開すると代表銘柄ごとのスコアも確認できます。")
@@ -1919,7 +2263,7 @@ def render_dashboard_page(period_key):
         render_sector_strength(period_key)
 
     st.markdown('<div class="section-title">🏦 大口投資家の動き</div>', unsafe_allow_html=True)
-    st.caption("内部者クラスター買い・ARK Invest・SEC Form 13D・著名投資家(dataroma)の4つの情報源をタブで切り替えて確認できます。")
+    st.caption("ARK Invest・内部者クラスター買い・SEC Form 13D・著名投資家(dataroma)の4つの情報源をタブで切り替えて確認できます。")
     render_institutional_investors()
 
     st.markdown('<div class="section-title">🔗 資産相関マトリクス</div>', unsafe_allow_html=True)
@@ -1933,10 +2277,11 @@ def render_dashboard_page(period_key):
 
 
 def render_portfolio_page(period_key):
-    """「📁 マイポートフォリオ」ページ：保有銘柄の登録・評価損益・4観点の見立て・
-    チャート・ポジション調整の参考材料・ポートフォリオ強化のテーマ提案を表示する。"""
+    """「📁 マイポートフォリオ」ページ：保有銘柄・預り金の登録・評価損益（円換算併記）・
+    4観点の見立て・チャート・ポジション調整の参考材料・ポートフォリオ強化のテーマ提案・
+    「もし追加投資を検討するなら」の考察を表示する。"""
     st.title("📁 マイポートフォリオ")
-    st.caption("保有銘柄を登録すると、評価損益や複数の観点からの見立てが確認できます。")
+    st.caption("保有銘柄・預り金を登録すると、評価損益や複数の観点からの見立てが確認できます。")
 
     init_portfolio_state()
     render_portfolio_form()
@@ -1944,6 +2289,15 @@ def render_portfolio_page(period_key):
     _portfolio_holdings = render_portfolio_holdings(period_key)
     st.markdown("**🔍 見立て（テクニカル / テーマ・セクター / マクロ / ファンダメンタルズ）**")
     render_portfolio_assessment(_portfolio_holdings, period_key)
+
+    st.markdown("**💡 もし追加投資を検討するなら**")
+    render_investment_consideration(
+        _portfolio_holdings,
+        period_key,
+        get_commentary(),
+        _current_cash_jpy(),
+        get_usdjpy_rate(),
+    )
 
 
 # =====================================================
@@ -1953,7 +2307,7 @@ def render_portfolio_page(period_key):
 st.sidebar.title("⚙️ 設定")
 page = st.sidebar.radio(
     "📌 ページ",
-    options=["📊 分析ダッシュボード", "📁 マイポートフォリオ"],
+    options=["📊 分析ダッシュボード", "📁 マイポートフォリオ", "📰 ニュースアーカイブ"],
     index=0,
 )
 st.sidebar.markdown("---")
@@ -1985,5 +2339,7 @@ st.sidebar.caption(
 
 if page == "📊 分析ダッシュボード":
     render_dashboard_page(period_key)
-else:
+elif page == "📁 マイポートフォリオ":
     render_portfolio_page(period_key)
+else:
+    render_news_archive_page()
