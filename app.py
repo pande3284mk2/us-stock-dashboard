@@ -1011,6 +1011,83 @@ def get_usdjpy_rate():
         return None
 
 
+EXTENDED_HOURS_CACHE_TTL = 300  # 時間外（プレ/アフターマーケット）データは値動きが速いため、通常の15分キャッシュより短い5分にする
+
+
+@st.cache_data(ttl=EXTENDED_HOURS_CACHE_TTL, show_spinner=False)
+def get_extended_hours_info(ticker):
+    """yfinanceのticker.info（Yahoo!ファイナンスのデータ）から、プレマーケット／
+    アフターマーケットの値動きを取得する。
+
+    Yahoo!ファイナンスが時間外データを提供していない銘柄（小型株・ADRなど）では
+    該当フィールド自体が存在しない、またはNoneのことがある。その場合は取得できな
+    かったフィールドをNoneのまま返し、呼び出し側で「時間外データなし」のフォール
+    バック表示を行う（エラーにはしない）。
+    """
+    try:
+        t = yf.Ticker(ticker)
+        info = t.get_info() if hasattr(t, "get_info") else t.info
+    except Exception:
+        return None
+    if not info:
+        return None
+    return {
+        "previous_close": info.get("regularMarketPreviousClose"),
+        "regular_price": info.get("regularMarketPrice"),
+        "post_price": info.get("postMarketPrice"),
+        "post_change": info.get("postMarketChange"),
+        "post_change_pct": info.get("postMarketChangePercent"),
+        "pre_price": info.get("preMarketPrice"),
+        "pre_change": info.get("preMarketChange"),
+        "pre_change_pct": info.get("preMarketChangePercent"),
+    }
+
+
+def _render_extended_hours_caption(ticker, shares, usdjpy_rate):
+    """保有銘柄カードの下部に、時間外（プレ/アフターマーケット）の値動きを補足表示する。
+
+    postMarketPriceがあれば「🌙 アフターマーケット」、なければpreMarketPriceが
+    あれば「🌅 プレマーケット」として、前日終値（regularMarketPreviousClose）を
+    基準にした変化額・変化率をドル・円の両方で表示する。Yahoo側のpostMarketChange /
+    preMarketChangeフィールドが取得できていればそれを優先し、欠けている場合のみ
+    取得した前日終値から自前で計算するフォールバックを行う。
+    どちらのデータも取得できない銘柄では、正直に「時間外データなし」と表示し、
+    通常の現在値ベースの損益表示のみにフォールバックする。
+    """
+    ext = get_extended_hours_info(ticker)
+    has_post = ext is not None and ext.get("post_price") not in (None, 0)
+    has_pre = ext is not None and ext.get("pre_price") not in (None, 0)
+
+    if not (has_post or has_pre):
+        st.caption("🕒 時間外の動き: 時間外データなし（この銘柄は時間外取引データを取得できませんでした）")
+        return
+
+    if has_post:
+        label = "🌙 アフターマーケット"
+        ext_price = ext.get("post_price")
+        ext_change = ext.get("post_change")
+        ext_change_pct = ext.get("post_change_pct")
+    else:
+        label = "🌅 プレマーケット"
+        ext_price = ext.get("pre_price")
+        ext_change = ext.get("pre_change")
+        ext_change_pct = ext.get("pre_change_pct")
+
+    prev_close = ext.get("previous_close")
+    if (ext_change is None or ext_change_pct is None) and prev_close:
+        # Yahoo側の変化額フィールドが欠けている場合は、取得した前日終値から自前で計算する
+        ext_change = ext_price - prev_close
+        ext_change_pct = (ext_price / prev_close - 1) * 100 if prev_close else None
+
+    text = f"🕒 時間外の動き: {label} ${ext_price:,.2f}"
+    if ext_change is not None and ext_change_pct is not None:
+        text += f"（{ext_change:+.2f}ドル / {ext_change_pct:+.2f}%）"
+        if usdjpy_rate:
+            position_change_jpy = ext_change * shares * usdjpy_rate
+            text += f" ｜ 保有{shares:g}株換算 約{position_change_jpy:+,.0f}円"
+    st.caption(text)
+
+
 def compute_technical_view(ticker):
     """20日・50日移動平均線との位置関係や、直近のゴールデンクロス/デッドクロス、
     直近5営業日のモメンタムから、簡易的なテクニカル分析コメントを機械的に組み立てる。
@@ -1794,6 +1871,9 @@ def render_portfolio_holdings(period_key):
                     pl_value_text,
                     delta=f"{pl_pct:+.2f}%" if pl_pct is not None else None,
                 )
+
+        # 通常取引の損益表示の下に、時間外（プレ/アフターマーケット）の動きを補足表示する
+        _render_extended_hours_caption(h["ticker"], h["shares"], usdjpy_rate)
 
         results.append(
             {
