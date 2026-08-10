@@ -978,8 +978,8 @@ def compute_technical_view(ticker):
         return None
 
     text = "テクニカル的には、" + "".join(lines)
-    text = text.replace("¥VAL20", f"${{last_sma20:,.2f}" if last_sma20 is not None else "-")
-    text = text.replace("¥VAL50", f"${{last_sma50:,.2f}" if last_sma50 is not None else "-")
+    text = text.replace("¥VAL20", f"${last_sma20:,.2f}" if last_sma20 is not None else "-")
+    text = text.replace("¥VAL50", f"${last_sma50:,.2f}" if last_sma50 is not None else "-")
 
     return {
         "text": text,
@@ -1033,7 +1033,7 @@ def render_fundamentals_text(ticker):
         (f"時価総額: ¥MC" if mc else "時価総額: データなし"),
     ]
     text = " ／ ".join(parts)
-    text = text.replace("¥MC", f"${{mc / 1e9:,.1f}B" if mc else "")
+    text = text.replace("¥MC", f"${mc / 1e9:,.1f}B" if mc else "")
     return text
 
 
@@ -1182,7 +1182,7 @@ def render_sector_strength(period_key):
                         last_price = stk_close.dropna().iloc[-1]
                         st.metric(
                             label=stk,
-                            value=f"${{last_price:,.2f}",
+                            value=f"${last_price:,.2f}",
                             delta=f"{stk_chg:+.2f}%",
                         )
 
@@ -1373,7 +1373,7 @@ def render_theme_strength(period_key):
                         last_price = stk_close.dropna().iloc[-1]
                         st.metric(
                             label=stk,
-                            value=f"${{last_price:,.2f}",
+                            value=f"${last_price:,.2f}",
                             delta=f"{stk_chg:+.2f}%",
                         )
 
@@ -1637,7 +1637,7 @@ def render_portfolio_holdings(period_key):
         with cols[0]:
             st.metric("銘柄", h["ticker"])
         with cols[1]:
-            st.metric("取得単価", f"${{h['cost_basis']:,.2f}")
+            st.metric("取得単価", f"${h['cost_basis']:,.2f}")
         if current_price is None:
             with cols[2]:
                 st.metric("現在値", "取得失敗")
@@ -1649,11 +1649,11 @@ def render_portfolio_holdings(period_key):
             with cols[2]:
                 st.metric(
                     "現在値",
-                    f"${{current_price:,.2f}",
+                    f"${current_price:,.2f}",
                     delta=f"{period_chg:+.2f}%" if period_chg is not None else None,
                 )
             with cols[3]:
-                pl_value_text = f"${{pl_amount:,.2f}"
+                pl_value_text = f"${pl_amount:,.2f}"
                 if usdjpy_rate:
                     pl_amount_jpy = pl_amount * usdjpy_rate
                     pl_value_text += f"（約{pl_amount_jpy / 10000:+.1f}万円）"
@@ -1831,7 +1831,7 @@ def render_investment_consideration(holdings_with_price, period_key, commentary_
     if cash_jpy > 0:
         cash_note = f"現在登録されている預り金は約{cash_jpy:,.0f}円です。"
         if usdjpy_rate:
-            cash_note += f"（1ドル={usdjpy_rate:,.2f}円換算で約${{cash_jpy / usdjpy_rate:,.2f}相当）"
+            cash_note += f"（1ドル={usdjpy_rate:,.2f}円換算で約${cash_jpy / usdjpy_rate:,.2f}相当）"
     else:
         cash_note = "現在、預り金は登録されていません。"
 
