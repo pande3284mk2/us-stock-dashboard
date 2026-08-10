@@ -5,22 +5,22 @@
 
 【このスクリプトは何をするもの？】
   GitHub Actions（GitHubが無料で提供している「決まった時刻に自動でプログラムを
-  実行してくれる仕組み」）から30分おき（毎時0分・30分）に呼び出され、
-  portfolio.json に書かれている保有株について、
+  実行してくれる仕組み」）から5分おき（毎時0,5,10,15,20,25,30,35,40,45,50,55分）
+  に呼び出され、portfolio.json に書かれている保有株について、
     1. 現在の株価（時間外取引・プレマーケットの値も含む）
     2. 前日の終値からの変化率(%)
     3. その変化を円換算した場合の損益（当日分）
   を計算し、条件に応じて m.pande3284mk2@gmail.com 宛にメールを送ります。
 
 【メールが届くタイミング（重要）】
-  - 毎時0分・30分の実行のたび「必ず」チェックし、
+  - 5分ごとの実行のたび「必ず」チェックし、
     保有銘柄のどれかが前日比 ±3%以上動いていれば、その場でアラートメールを送る。
-    （0分・30分どちらの実行でも扱いは同じ）
+    （毎時何分の実行でも扱いは同じ）
   - それとは別に、毎時30分の実行の時「だけ」、値動きの大きさに関係なく、
     保有銘柄全体の状況をまとめた「定時サマリーメール」を必ず送る。
   → そのため毎時30分は、条件次第で「定時サマリー」と「アラート」の
-    2通のメールが同時に届くことがあります。毎時0分は、条件に当てはまる
-    銘柄がある場合のみ「アラート」の1通だけが届きます。
+    2通のメールが同時に届くことがあります。それ以外の5分刻みの実行は、
+    条件に当てはまる銘柄がある場合のみ「アラート」の1通だけが届きます。
 
 【個別銘柄の売買推奨は一切行いません。あくまで価格変動の事実をお知らせするだけです。】
 
@@ -210,8 +210,8 @@ def format_summary_email(report, usdjpy_rate):
     lines.append(f"―― 合計 ――")
     lines.append(f"保有銘柄の当日の円換算損益 合計: {total_jpy_change:+,.0f} 円")
     lines.append("")
-    lines.append("※ このメールは30分ごとの定時レポートです。前日比±3%以上の急な値動きがあった場合は、")
-    lines.append("　 別途「アラート」メールが届きます。")
+    lines.append("※ このメールは毎時30分に届く定時レポートです。前日比±3%以上の急な値動きがあった場合は、")
+    lines.append("　 5分ごとのチェックで別途「アラート」メールが届きます。")
     lines.append("")
     lines.append("⚠️ このメールは価格変動の事実をお知らせするものであり、投資助言ではありません。")
     lines.append("　 個別銘柄の売買判断はご自身の責任で行ってください。")
@@ -287,7 +287,7 @@ def send_email(subject, body):
 
 def main():
     # IS_SUMMARY_RUN は .github/workflows/portfolio_alert.yml の中で、
-    # 「毎時30分の実行かどうか」に応じて "true" / "false" が渡される環境変数。
+    # 実行時刻（UTC・分）が30分かどうかに応じて "true" / "false" が渡される環境変数。
     is_summary_run = os.environ.get("IS_SUMMARY_RUN", "false").strip().lower() == "true"
 
     holdings, _cash_jpy = load_portfolio()
@@ -298,7 +298,7 @@ def main():
     usdjpy_rate = get_usdjpy_rate()
     report = build_holdings_report(holdings, usdjpy_rate)
 
-    # ---- ①アラートチェック：毎時0分・30分どちらの実行でも必ず行う ----
+    # ---- ①アラートチェック：5分ごとの実行のたび必ず行う ----
     triggered = [
         r for r in report
         if not r["error"] and abs(r["pct_change"]) >= ALERT_THRESHOLD_PCT
@@ -314,7 +314,7 @@ def main():
         subject, body = format_summary_email(report, usdjpy_rate)
         send_email(subject, body)
     else:
-        print("今回は毎時0分の実行のため、定時サマリーメールは送信しません（アラートのみ判定）。")
+        print("今回は毎時30分の実行ではないため、定時サマリーメールは送信しません（アラートのみ判定）。")
 
 
 if __name__ == "__main__":
