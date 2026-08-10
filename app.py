@@ -1357,28 +1357,45 @@ def render_theme_heatmap(df):
             grid_text[r_idx][c_idx] = f"{short}<br>{score:+.1f}%"
             grid_full[r_idx][c_idx] = f"{theme_name}: {score:+.2f}%"
 
-    # 色のコントラストを最大化するため、zmin/zmaxは固定値ではなく、その時点で
-    # 計算された全テーマの騰落率の実際の最小値・最大値を使って動的に設定する。
-    # 上昇・下落の振れ幅は日によって非対称なことが多い（例：一部テーマだけ+15%と
-    # 突出し、残りは-3%程度に収まる日）ため、対称レンジに強制せず実際のmin/maxを
-    # そのまま使うことで、大多数のセルが埋もれずコントラストが最大限効くようにする。
-    # その上でcolor_continuous_midpoint=0を併用し、0%が常に中間色（黄）になるよう
-    # 固定する（Plotlyはzmin/zmaxが非対称でもzmidを境に両側を独立に補間できる）。
-    # 値の振れ幅が極端に小さい日（例：全テーマが±1%程度しか動いていない日）でも
-    # 色が破綻しないよう、最低でも-3%〜+3%のレンジは確保する。
+    # 色のコントラストを最大化するため、プラス値とマイナス値を別々に正規化してから
+    # RdYlGnスケールに渡す。単純に実際のmin/maxで非対称なレンジ（例：最大+15%・
+    # 最小-3%）を使うと、値の振れ幅が狭い側（この例ではマイナス側）は結局
+    # 「0〜-3%」という狭い範囲に色が圧縮され、マイナス値同士（例：-0.5%と-2.8%）の
+    # 赤の濃淡がほとんど区別できなくなってしまう問題があった。
+    # そこで、0以上の値は「0（薄い黄緑）→ その日の最大値（濃い緑）」、0未満の値は
+    # 「0（薄いクリーム）→ その日の最小値（濃い赤）」というように、プラス側は
+    # その日の最大値、マイナス側はその日の最小値の絶対値を、それぞれ独立した分母として
+    # -1〜+1の範囲に正規化する（例：+7%は+7/最大値、-2%は-2/|最小値|）。
+    # これにより、プラス・マイナスそれぞれが自分の範囲内でフルに色の濃淡を使えるように
+    # なる。値が全て同符号の日（例：全テーマがプラス）でも、該当しない側の分母が
+    # 存在せずゼロ除算にならないよう、それぞれ独立に最低±3%のフォールバック値を
+    # 用意している。なお色の元データのみを正規化しており、セルに表示される数値や
+    # ホバー時のツールチップは実際の騰落率（%）のままである。
     flat_scores = [v for row in grid_z for v in row if v == v]  # v == v はNaN除外
-    if flat_scores:
-        zmin_val = min(min(flat_scores), -3.0)
-        zmax_val = max(max(flat_scores), 3.0)
-    else:
-        zmin_val, zmax_val = -3.0, 3.0
+    pos_scores = [v for v in flat_scores if v > 0]
+    neg_scores = [v for v in flat_scores if v < 0]
+    max_pos = max(pos_scores) if pos_scores else 3.0
+    min_neg_abs = abs(min(neg_scores)) if neg_scores else 3.0
+    if max_pos <= 0:
+        max_pos = 3.0
+    if min_neg_abs <= 0:
+        min_neg_abs = 3.0
+
+    def _normalize_for_color(v):
+        if v != v:  # NaN
+            return v
+        if v >= 0:
+            return v / max_pos
+        return v / min_neg_abs
+
+    grid_color = [[_normalize_for_color(v) for v in row] for row in grid_z]
 
     fig = px.imshow(
-        grid_z,
+        grid_color,
         color_continuous_scale="RdYlGn",
         color_continuous_midpoint=0,
-        zmin=zmin_val,
-        zmax=zmax_val,
+        zmin=-1,
+        zmax=1,
         aspect="auto",
         x=categories,
     )
@@ -1396,12 +1413,17 @@ def render_theme_heatmap(df):
         paper_bgcolor="rgba(0,0,0,0)",
         yaxis_visible=False,
         xaxis=dict(side="top", tickfont=dict(size=11)),
-        coloraxis_colorbar=dict(title="騰落率(%)"),
+        # 色データはプラス・マイナスをそれぞれ独立に-1〜+1へ正規化したものであり、
+        # 実際の騰落率（%）とは対応しないため、誤解を招かないようカラーバー（凡例）は
+        # 非表示にする。正確な数値はセル内テキストとホバー時のツールチップで確認できる。
+        coloraxis_showscale=False,
     )
     st.plotly_chart(fig, use_container_width=True)
     st.caption(
         "横軸は大分類（テクノロジー系・ヘルスケア系など）、各列内は上ほどそのカテゴリ内で"
         "相対的に強いテーマです。色が濃い緑ほど強く、濃い赤ほど弱いことを示します。"
+        "プラス・マイナスはそれぞれその日の最大値・最小値を基準に独立して色分けしているため、"
+        "小さな下落と大きな下落の差も赤の濃淡ではっきり区別できます。"
         "セルにカーソルを合わせるとテーマのフルネームと正確なスコアを確認できます。"
     )
 
