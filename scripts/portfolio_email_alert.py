@@ -217,8 +217,7 @@ def format_summary_email(report, usdjpy_rate):
     lines.append("　 個別銘柄の売買判断はご自身の責任で行ってください。")
 
     subject = f"【定時サマリー】ポートフォリオ時間外レポート {datetime.now(JST).strftime('%m/%d %H:%M')}"
-    return subject, "
-".join(lines)
+    return subject, "\n".join(lines)
 
 
 def format_alert_email(triggered):
@@ -244,8 +243,7 @@ def format_alert_email(triggered):
     lines.append("　 個別銘柄の売買判断はご自身の責任で行ってください。")
 
     subject = f"【アラート】{' / '.join(ticker_labels)}"
-    return subject, "
-".join(lines)
+    return subject, "\n".join(lines)
 
 
 # =====================================================
