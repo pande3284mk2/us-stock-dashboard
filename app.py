@@ -2847,6 +2847,68 @@ def render_dashboard_page(period_key):
     )
 
 
+def render_extended_hours_summary(holdings, usdjpy_rate):
+    """マイポートフォリオページ冒頭に表示する、保有銘柄全体の時間外（プレ/アフター
+    マーケット）サマリー。個別銘柄カード内の詳細な「時間外の動き」表示とは別に、
+    ページを開いてすぐ全体像をざっと把握できるよう、銘柄ごとの引け（前日終値）からの
+    変化率と、保有株数×為替レートで円換算した変化額を一覧表示する。
+    既存のget_extended_hours_info()、marketStateによる状態判定、円換算ロジック
+    （変化額×株数×為替レート）を再利用している。
+    """
+    if not holdings:
+        return
+
+    st.markdown("**🕒 時間外サマリー**")
+    rows = []
+    for h in holdings:
+        ticker = h["ticker"]
+        shares = h["shares"]
+        ext = get_extended_hours_info(ticker)
+        has_post = ext is not None and ext.get("post_price") not in (None, 0)
+        has_pre = ext is not None and ext.get("pre_price") not in (None, 0)
+
+        if has_post:
+            state_label = "🌙 アフター"
+            ext_price = ext.get("post_price")
+            ext_change = ext.get("post_change")
+            ext_change_pct = ext.get("post_change_pct")
+        elif has_pre:
+            state_label = "🌅 プレ"
+            ext_price = ext.get("pre_price")
+            ext_change = ext.get("pre_change")
+            ext_change_pct = ext.get("pre_change_pct")
+        else:
+            # 個別カードのフォールバックと同じmarketState判定を、1行で簡潔に表現する。
+            market_state = ext.get("market_state") if ext else None
+            if market_state == "REGULAR":
+                state_label = "通常取引中（時間外データなし）"
+            elif market_state in ("PRE", "PREPRE"):
+                state_label = "プレマーケット中（気配データなし）"
+            elif market_state in ("POST", "POSTPOST"):
+                state_label = "アフターマーケット中（気配データなし）"
+            else:
+                state_label = "市場閉場中（時間外データなし）"
+            rows.append({"銘柄": ticker, "状況": state_label, "変化率": "-", "円換算": "-"})
+            continue
+
+        prev_close = ext.get("previous_close")
+        if (ext_change is None or ext_change_pct is None) and prev_close:
+            ext_change = ext_price - prev_close
+            ext_change_pct = (ext_price / prev_close - 1) * 100 if prev_close else None
+
+        pct_text = f"{ext_change_pct:+.2f}%" if ext_change_pct is not None else "-"
+        if ext_change is not None and usdjpy_rate:
+            jpy_change = ext_change * shares * usdjpy_rate
+            jpy_text = f"約{jpy_change:+,.0f}円"
+        else:
+            jpy_text = "-"
+        rows.append({"銘柄": ticker, "状況": state_label, "変化率": pct_text, "円換算": jpy_text})
+
+    summary_df = pd.DataFrame(rows, columns=["銘柄", "状況", "変化率", "円換算"])
+    st.dataframe(summary_df, hide_index=True, use_container_width=True)
+    st.caption(_OVERNIGHT_DISCLAIMER)
+
+
 def render_portfolio_page(period_key):
     """「📁 マイポートフォリオ」ページ：保有銘柄・預り金の登録・評価損益（円換算併記）・
     4観点の見立て・チャート・ポジション調整の参考材料・ポートフォリオ強化のテーマ提案・
@@ -2855,6 +2917,7 @@ def render_portfolio_page(period_key):
     st.caption("保有銘柄・預り金を登録すると、評価損益や複数の観点からの見立てが確認できます。")
 
     init_portfolio_state()
+    render_extended_hours_summary(_current_portfolio_holdings(), get_usdjpy_rate())
     render_portfolio_form()
     st.markdown("**💰 保有状況**")
     _portfolio_holdings = render_portfolio_holdings(period_key)
