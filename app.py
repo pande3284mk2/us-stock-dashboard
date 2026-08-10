@@ -1129,10 +1129,13 @@ def _render_extended_hours_caption(ticker, shares, usdjpy_rate):
 
 
 def compute_technical_view(ticker):
-    """20日・50日移動平均線との位置関係や、直近のゴールデンクロス/デッドクロス、
-    直近5営業日のモメンタムから、簡易的なテクニカル分析コメントを機械的に組み立てる。
+    """20日・50日移動平均線との位置関係、直近のゴールデンクロス/デッドクロス、
+    直近5営業日のモメンタム、RSI（14日）、MACD（12/26/9日）から、
+    簡易的なテクニカル分析コメントを機械的に組み立てる。
 
-    これはAIによる予測ではなく、移動平均線の計算結果を条件分岐で文章化しているだけである点に注意。
+    これはAIによる予測ではなく、各指標の計算結果を条件分岐で文章化しているだけである点に注意。
+    RSI・MACDともにpandasの標準的な計算式（Wilderのスムージング／指数移動平均）で自前実装しており、
+    追加の有料APIやライブラリは使用していない。
     """
     hist = get_stock_history(ticker, "6mo")
     close = hist["Close"].dropna() if not hist.empty else pd.Series(dtype=float)
@@ -1166,6 +1169,51 @@ def compute_technical_view(ticker):
     below20 = last_sma20 is not None and last_close < last_sma20
     below50 = last_sma50 is not None and last_close < last_sma50
 
+    # RSI（相対力指数、14日）。Wilderのスムージング（ewm alpha=1/14）を使う標準的な計算式。
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1 / 14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / 14, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    rsi_series = (100 - (100 / (1 + rs))).dropna()
+    last_rsi = rsi_series.iloc[-1] if len(close) >= 15 and not rsi_series.empty else None
+
+    rsi_state = None
+    if last_rsi is not None:
+        if last_rsi >= 70:
+            rsi_state = "買われすぎ"
+        elif last_rsi <= 30:
+            rsi_state = "売られすぎ"
+        else:
+            rsi_state = "中立"
+
+    # MACD（移動平均収束拡散、12日EMA・26日EMA・9日シグナル）。標準的な指数移動平均で計算。
+    last_macd = None
+    last_signal = None
+    macd_cross = None
+    if len(close) >= 35:
+        ema12 = close.ewm(span=12, adjust=False).mean()
+        ema26 = close.ewm(span=26, adjust=False).mean()
+        macd_line = ema12 - ema26
+        signal_line = macd_line.ewm(span=9, adjust=False).mean()
+        last_macd = macd_line.iloc[-1]
+        last_signal = signal_line.iloc[-1]
+
+        macd_diff = (macd_line - signal_line).dropna()
+        recent_macd_diff = macd_diff.tail(10)
+        if len(recent_macd_diff) >= 2:
+            macd_sign = (recent_macd_diff > 0).astype(int)
+            macd_changes = macd_sign.diff().dropna()
+            if (macd_changes == 1).any():
+                macd_cross = "ゴールデンクロス"
+            elif (macd_changes == -1).any():
+                macd_cross = "デッドクロス"
+
+    above_macd_signal = None
+    if last_macd is not None and last_signal is not None:
+        above_macd_signal = last_macd >= last_signal
+
     lines = []
     if last_sma20 is not None:
         pos20 = "上" if above20 else "下"
@@ -1178,6 +1226,13 @@ def compute_technical_view(ticker):
     if momentum_5d is not None:
         direction = "上昇" if momentum_5d >= 0 else "下落"
         lines.append(f"直近5営業日の値動きは{momentum_5d:+.2f}%と{direction}基調です。")
+    if last_rsi is not None:
+        lines.append(f"RSI（14日）は{last_rsi:.1f}で、{rsi_state}の水準です。")
+    if above_macd_signal is not None:
+        macd_pos = "上" if above_macd_signal else "下"
+        lines.append(f"MACD線はシグナル線の{macd_pos}に位置しています。")
+        if macd_cross:
+            lines.append(f"直近10営業日以内にMACDの{macd_cross}（MACD線とシグナル線の交差）が発生しています。")
 
     if not lines:
         return None
@@ -1194,6 +1249,12 @@ def compute_technical_view(ticker):
         "below_sma50": below50,
         "cross": cross,
         "momentum_5d": momentum_5d,
+        "rsi": last_rsi,
+        "rsi_state": rsi_state,
+        "macd": last_macd,
+        "macd_signal": last_signal,
+        "macd_cross": macd_cross,
+        "above_macd_signal": above_macd_signal,
     }
 
 
@@ -1243,8 +1304,8 @@ def render_fundamentals_text(ticker):
 
 
 def render_stock_chart(ticker):
-    """保有銘柄の日足チャート（ローソク足、直近6ヶ月）を表示する。"""
-    hist = get_stock_history(ticker, "6mo")
+    """保有銘柄の日足チャート（ローソク足、直近3ヶ月）を表示する。"""
+    hist = get_stock_history(ticker, "3mo")
     if hist is None or hist.empty:
         st.caption(f"{ticker}のチャートデータを取得できませんでした。")
         return
