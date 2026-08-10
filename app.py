@@ -11,7 +11,8 @@
   1. 主要指数カード（ダウ30・S&P500・ナスダック100・ビットコイン・金、ページ最上部）
   2. テーマ強弱ランキング（半導体・AIインフラなど60以上のテーマの騰落率、代表銘柄スコア＋ヒートマップ）
   3. セクター強弱ランキング（11セクターETFの騰落率・参考情報として折りたたみ表示）
-  4. 本日の相場考察（強気テーマ／弱気テーマを同ボリュームで併記、関連ニュースへの導線付き）
+  4. 本日の相場考察（強気テーマ／弱気テーマを同ボリュームで併記、関連ニュースへの導線付き、
+     Claude執筆版／GitHub Actionsによる自動簡易更新版を判別する更新状態バッジ付き）
   5. マイポートフォリオ（保有銘柄の登録・預り金・評価損益の円換算・4観点の見立て・日足チャート・
      ポジション調整の両論併記・ポートフォリオ強化のテーマ提案・追加投資を検討する場合の考察）
   6. 大口投資家の動き（ARK Invest / 内部者クラスター買い / SEC Form 13D / dataroma.com）
@@ -2143,6 +2144,29 @@ def render_commentary(period_key):
     headline = data.get("headline", "")
     lead = data.get("lead", "")
     date_str = data.get("date", "")
+    generated_by = data.get("generated_by")
+
+    # 更新状態バッジ：今日の考察が「Claudeによる詳細分析」か、PCが閉じていた場合の
+    # 「GitHub Actionsによる自動簡易更新」かを一目で判別できるようにする。
+    # generated_byフィールドが無い場合（従来形式のファイル）はバッジを表示しない。
+    if generated_by == "github-actions":
+        st.markdown(
+            '<div style="display:inline-block; background:rgba(234,179,8,0.15); '
+            'border:1px solid #eab308; color:#fde68a; border-radius:999px; '
+            'padding:4px 14px; font-size:0.85rem; margin-bottom:10px;">'
+            '🤖 自動簡易更新版（Claudeによる詳細分析はまだ未反映です。数値は正確ですが、考察文は簡易的なものです）'
+            "</div>",
+            unsafe_allow_html=True,
+        )
+    elif generated_by == "claude":
+        st.markdown(
+            '<div style="display:inline-block; background:rgba(34,197,94,0.15); '
+            'border:1px solid #22c55e; color:#86efac; border-radius:999px; '
+            'padding:4px 14px; font-size:0.85rem; margin-bottom:10px;">'
+            "✨ Claudeが分析・執筆した本日版です"
+            "</div>",
+            unsafe_allow_html=True,
+        )
 
     if headline:
         st.subheader(f"🗞️ {headline}")
