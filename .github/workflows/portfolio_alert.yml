@@ -1,0 +1,101 @@
+name: Portfolio Email Alert
+
+# ポートフォリオ（保有株）の時間外・プレマーケットの値動きを、5分おきに
+# チェックしてメールでお知らせするワークフロー。
+# GitHub Actions（GitHubが無料で提供している「決まった時刻に自動でプログラムを
+# 実行してくれる仕組み」）を使い、PCやアプリを閉じていても実行される。
+#
+# 通知のルール（scripts/portfolio_email_alert.py 側で判定）:
+#   ・5分ごと（毎時0,5,10,15,20,25,30,35,40,45,50,55分）の実行のたび、
+#     「前回チェック（5分前）の価格」からの変化率が±3%以上なら、その場で
+#     アラートメールを送る（前日終値ではなく、直近の5分前比較）。
+#   ・毎時30分の実行のときだけ、値動きに関係なく、保有銘柄全体の
+#     定時サマリーメール（前日終値からの変化率）も必ず送る。
+#   → 毎時30分は「定時サマリー」＋「（該当あれば）アラート」の2通が届く場合がある。
+#      それ以外の5分刻みの実行は「（該当あれば）アラート」のみ。
+#
+# 「前回チェック時の価格」は data/last_check_prices.json に保存し、実行の
+# 最後にこのワークフローがリポジトリへコミットし直す（このためリポジトリへの
+# 書き込み権限 contents: write が必要）。
+#
+# ［2026-08-10 追記］毎時0分ちょうどはGitHub Actions全体で実行が混雑し、
+# スケジュール実行が遅延しやすいとGitHub公式ドキュメントに記載されているため、
+# 実行タイミングを毎時2,7,12,17,22,27,32,37,42,47,52,57分にずらしている。
+# また、スケジュール実行が一度も認識されない不具合の対策として、
+# このワークフローファイルを一度削除し、まっさらな状態で作り直している。
+
+on:
+  schedule:
+    # 5分おき・毎時0分ジャストを避けて2分オフセット（UTC基準）
+    - cron: "2-59/5 * * * *"
+  # GitHubの「Actions」画面から手動で今すぐ実行したい時のためのボタンも用意しておく。
+  workflow_dispatch:
+    inputs:
+      run_as_summary:
+        description: "手動実行時に定時サマリーとして扱う場合は true"
+        required: false
+        default: "false"
+
+permissions:
+  contents: write
+
+# 5分間隔の実行が万一重なった場合に、data/last_check_prices.json への
+# 書き込みが衝突しないよう、同時には1つの実行だけが動くようにする
+# （前の実行が終わるまで次の実行は待たされる。取りこぼしにはならない）。
+concurrency:
+  group: portfolio-alert
+  cancel-in-progress: false
+
+jobs:
+  check-and-notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install yfinance
+
+      - name: Determine whether this run is the 30-minute summary run
+        # 5分おきの単一cron（2-59/5 * * * *）だけでは「今が毎時30分の実行か」を
+        # 区別できないため、実行時刻（UTC・分）を直接調べて判定する。
+        # 手動実行（workflow_dispatch）の場合は、入力欄 run_as_summary の値を使う。
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "IS_SUMMARY_RUN=${{ github.event.inputs.run_as_summary }}" >> "$GITHUB_ENV"
+          else
+            CURRENT_MINUTE=$(date -u +%M)
+            if [ "$CURRENT_MINUTE" = "30" ]; then
+              echo "IS_SUMMARY_RUN=true" >> "$GITHUB_ENV"
+            else
+              echo "IS_SUMMARY_RUN=false" >> "$GITHUB_ENV"
+            fi
+          fi
+
+      - name: Run portfolio email alert script
+        env:
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          IS_SUMMARY_RUN: ${{ env.IS_SUMMARY_RUN }}
+        run: python scripts/portfolio_email_alert.py
+
+      - name: Commit updated last-check prices
+        # data/last_check_prices.json が変化していればコミットし直す。
+        # このファイルは次回5分後の実行が「前回価格」として読み込む。
+        run: |
+          if [ -n "$(git status --porcelain data/last_check_prices.json)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add data/last_check_prices.json
+            git commit -m "Update last-check prices"
+            git push
+          else
+            echo "変更なし。コミットは行いません。"
+          fi
