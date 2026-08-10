@@ -2958,8 +2958,12 @@ def render_portfolio_page(period_key):
     # ページ本文の一番上（スクロール不要な位置）にも同じ更新ボタンを配置する。
     # サイドバー側のボタンはそのまま残し、押した時の挙動（キャッシュクリア＋再実行）も揃える。
     if st.button("🔄 最新データに更新する", key="pf_refresh_top"):
+        # ボタンクリック自体がStreamlitの自然な再実行（rerun）を引き起こすため、
+        # ここで明示的にst.rerun()を追加で呼ぶと、フォーム入力欄の再同期が完了する前に
+        # もう一度強制リランがかかってしまい、保有銘柄データが一時的に空に見える不具合の
+        # 原因になっていた。st.cache_data.clear()だけで十分（次の自然な再実行時に
+        # キャッシュがクリアされた状態でデータが再取得される）。
         st.cache_data.clear()
-        st.rerun()
     st.caption("保有銘柄・預り金を登録すると、評価損益や複数の観点からの見立てが確認できます。")
 
     init_portfolio_state()
@@ -2999,8 +3003,9 @@ period_key = st.sidebar.selectbox(
 )
 
 if st.sidebar.button("🔄 最新データに更新する"):
+    # マイポートフォリオページ上部のボタンと同じ理由により、明示的なst.rerun()は
+    # 呼ばない（ボタンクリック自体がStreamlitの自然な再実行を引き起こすため）。
     st.cache_data.clear()
-    st.rerun()
 
 st.sidebar.markdown("---")
 st.sidebar.caption(
