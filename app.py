@@ -2852,6 +2852,8 @@ def render_extended_hours_summary(holdings, usdjpy_rate):
     マーケット）サマリー。個別銘柄カード内の詳細な「時間外の動き」表示とは別に、
     ページを開いてすぐ全体像をざっと把握できるよう、銘柄ごとの引け（前日終値）からの
     変化率と、保有株数×為替レートで円換算した変化額を一覧表示する。
+    最下部の「合計」行には、時間外データが取得できた銘柄についての円換算額の単純合計と、
+    各銘柄の保有評価額（現在値×株数）で加重平均した全体の変化率を表示する。
     既存のget_extended_hours_info()、marketStateによる状態判定、円換算ロジック
     （変化額×株数×為替レート）を再利用している。
     """
@@ -2860,6 +2862,11 @@ def render_extended_hours_summary(holdings, usdjpy_rate):
 
     st.markdown("**🕒 時間外サマリー**")
     rows = []
+    total_change_usd = 0.0
+    total_value_usd = 0.0
+    total_jpy_change = 0.0
+    has_any_data = False
+
     for h in holdings:
         ticker = h["ticker"]
         shares = h["shares"]
@@ -2900,12 +2907,45 @@ def render_extended_hours_summary(holdings, usdjpy_rate):
         if ext_change is not None and usdjpy_rate:
             jpy_change = ext_change * shares * usdjpy_rate
             jpy_text = f"約{jpy_change:+,.0f}円"
+            total_jpy_change += jpy_change
         else:
             jpy_text = "-"
         rows.append({"銘柄": ticker, "状況": state_label, "変化率": pct_text, "円換算": jpy_text})
 
+        # 合計・加重平均変化率の算出用（時間外データが実際に取得できた銘柄のみを対象とする）。
+        # 「現在の評価額」には、時間外情報取得時に併せて取得済みのregularMarketPriceを使う
+        # （追加のAPI呼び出しを増やさずに済むため）。
+        current_price = ext.get("regular_price")
+        if ext_change is not None and current_price:
+            total_change_usd += ext_change * shares
+            total_value_usd += current_price * shares
+            has_any_data = True
+
+    if has_any_data and total_value_usd > 0:
+        # 合計変化率 = 合計変化額 ÷ 現在の評価額合計（保有評価額による加重平均）。
+        weighted_pct = total_change_usd / total_value_usd * 100
+        weighted_pct_text = f"{weighted_pct:+.2f}%"
+        total_jpy_text = f"約{total_jpy_change:+,.0f}円"
+    else:
+        weighted_pct_text = "-"
+        total_jpy_text = "-"
+
+    rows.append({"銘柄": "合計", "状況": "", "変化率": weighted_pct_text, "円換算": total_jpy_text})
+
     summary_df = pd.DataFrame(rows, columns=["銘柄", "状況", "変化率", "円換算"])
-    st.dataframe(summary_df, hide_index=True, use_container_width=True)
+
+    def _highlight_total_row(row):
+        # 最終行（合計行）だけ太字＋上罫線をつけて、他の銘柄行と視覚的に区別する。
+        is_total = row.name == summary_df.index[-1]
+        style = "font-weight: bold; border-top: 2px solid rgba(250, 250, 250, 0.4);"
+        return [style if is_total else "" for _ in row]
+
+    styled_df = summary_df.style.apply(_highlight_total_row, axis=1).hide(axis="index")
+    st.table(styled_df)
+    st.caption(
+        "※ 合計の変化率は、時間外データが取得できた銘柄の保有評価額（現在値×株数）で"
+        "加重平均したものです（データが取得できない銘柄は合計・加重平均の対象外です）。"
+    )
     st.caption(_OVERNIGHT_DISCLAIMER)
 
 
