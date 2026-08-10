@@ -1048,6 +1048,12 @@ def get_extended_hours_info(ticker):
     }
 
 
+_OVERNIGHT_DISCLAIMER = (
+    "※ Yahoo!ファイナンス本家サイトに表示される「Overnight（時間外の常時取引）」価格には"
+    "対応していません。ここに表示されるのは通常のプレマーケット/アフターマーケットの気配です。"
+)
+
+
 def _render_extended_hours_caption(ticker, shares, usdjpy_rate):
     """保有銘柄カードの下部に、時間外（プレ/アフターマーケット）の値動きを補足表示する。
 
@@ -1092,6 +1098,7 @@ def _render_extended_hours_caption(ticker, shares, usdjpy_rate):
                 "取引時間外）のため、時間外データはありません。プレマーケット開始後、または"
                 "通常取引終了後に再度ご確認ください。"
             )
+        st.caption(_OVERNIGHT_DISCLAIMER)
         return
 
     if has_post:
@@ -1118,6 +1125,7 @@ def _render_extended_hours_caption(ticker, shares, usdjpy_rate):
             position_change_jpy = ext_change * shares * usdjpy_rate
             text += f" ｜ 保有{shares:g}株換算 約{position_change_jpy:+,.0f}円"
     st.caption(text)
+    st.caption(_OVERNIGHT_DISCLAIMER)
 
 
 def compute_technical_view(ticker):
