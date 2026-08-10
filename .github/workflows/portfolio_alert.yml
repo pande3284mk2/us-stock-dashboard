@@ -1,0 +1,69 @@
+name: Portfolio Email Alert
+
+# ポートフォリオ（保有株）の時間外・プレマーケットの値動きを、30分おきに
+# チェックしてメールでお知らせするワークフロー。
+# GitHub Actions（GitHubが無料で提供している「決まった時刻に自動でプログラムを
+# 実行してくれる仕組み」）を使い、PCやアプリを閉じていても実行される。
+#
+# 通知のルール（scripts/portfolio_email_alert.py 側で判定）:
+#   ・毎時0分・30分の実行のたび、必ず前日比±3%以上動いた銘柄がないかチェックし、
+#     あれば即アラートメールを送る。
+#   ・毎時30分の実行のときだけ、値動きに関係なく、保有銘柄全体の
+#     定時サマリーメールも必ず送る。
+#   → 毎時30分は「定時サマリー」＋「（該当あれば）アラート」の2通が届く場合がある。
+#      毎時0分は「（該当あれば）アラート」のみ。
+
+on:
+  schedule:
+    # 毎時0分（UTC基準。GitHub Actionsのスケジュールは世界標準時で指定する）
+    - cron: "0 * * * *"
+    # 毎時30分
+    - cron: "30 * * * *"
+  # GitHubの「Actions」画面から手動で今すぐ実行したい時のためのボタンも用意しておく。
+  workflow_dispatch:
+    inputs:
+      run_as_summary:
+        description: "手動実行時に定時サマリーとして扱う場合は true"
+        required: false
+        default: "false"
+
+permissions:
+  contents: read
+
+jobs:
+  check-and-notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install yfinance
+
+      - name: Determine whether this run is the 30-minute summary run
+        # github.event.schedule には、実際にトリガーされたcronの文字列
+        # （"0 * * * *" または "30 * * * *"）がそのまま入る。
+        # これを見て「毎時30分の実行かどうか」を IS_SUMMARY_RUN という
+        # 環境変数に変換し、以降のステップに引き継ぐ。
+        run: |
+          if [ "${{ github.event.schedule }}" = "30 * * * *" ]; then
+            echo "IS_SUMMARY_RUN=true" >> "$GITHUB_ENV"
+          elif [ "${{ github.event.schedule }}" = "0 * * * *" ]; then
+            echo "IS_SUMMARY_RUN=false" >> "$GITHUB_ENV"
+          else
+            echo "IS_SUMMARY_RUN=${{ github.event.inputs.run_as_summary }}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Run portfolio email alert script
+        env:
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          IS_SUMMARY_RUN: ${{ env.IS_SUMMARY_RUN }}
+        run: python scripts/portfolio_email_alert.py
