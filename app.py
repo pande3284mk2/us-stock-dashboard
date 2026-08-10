@@ -1357,10 +1357,20 @@ def render_theme_heatmap(df):
             grid_text[r_idx][c_idx] = f"{short}<br>{score:+.1f}%"
             grid_full[r_idx][c_idx] = f"{theme_name}: {score:+.2f}%"
 
+    # 色のコントラストを最大化するため、zmin/zmaxは固定値ではなく、その時点で
+    # 計算された全テーマの騰落率（絶対値）の最大値を使った対称レンジ（-X%〜+X%）を
+    # 動的に設定する。これにより、その日の実際のデータ分布に合わせて色の振れ幅が
+    # 最大限効くようになる。値の振れ幅が極端に小さい日（例：全テーマが±1%程度しか
+    # 動いていない日）でも色が破綻しないよう、最低でも±3%のレンジは確保する。
+    flat_scores = [v for row in grid_z for v in row if v == v]  # v == v はNaN除外
+    abs_max = max((abs(v) for v in flat_scores), default=0.0)
+    color_range = max(abs_max, 3.0)
+
     fig = px.imshow(
         grid_z,
         color_continuous_scale="RdYlGn",
-        color_continuous_midpoint=0,
+        zmin=-color_range,
+        zmax=color_range,
         aspect="auto",
         x=categories,
     )
