@@ -1130,12 +1130,13 @@ def _render_extended_hours_caption(ticker, shares, usdjpy_rate):
 
 def compute_technical_view(ticker):
     """20日・50日移動平均線との位置関係、直近のゴールデンクロス/デッドクロス、
-    直近5営業日のモメンタム、RSI（14日）、MACD（12/26/9日）から、
-    簡易的なテクニカル分析コメントを機械的に組み立てる。
+    直近5営業日のモメンタム、RSI（14日）、MACD（12/26/9日）、逆三尊（逆ヘッド・アンド・
+    ショルダーズ）の簡易パターン検出から、簡易的なテクニカル分析コメントを機械的に組み立てる。
 
     これはAIによる予測ではなく、各指標の計算結果を条件分岐で文章化しているだけである点に注意。
     RSI・MACDともにpandasの標準的な計算式（Wilderのスムージング／指数移動平均）で自前実装しており、
-    追加の有料APIやライブラリは使用していない。
+    追加の有料APIやライブラリは使用していない。逆三尊の検出も、局所安値の深さを比較するだけの
+    簡易的な近似ロジックであり、完璧なパターン認識ではない（誤検出の可能性がある）。
     """
     hist = get_stock_history(ticker, "6mo")
     close = hist["Close"].dropna() if not hist.empty else pd.Series(dtype=float)
@@ -1214,6 +1215,45 @@ def compute_technical_view(ticker):
     if last_macd is not None and last_signal is not None:
         above_macd_signal = last_macd >= last_signal
 
+    # 逆三尊（逆ヘッド・アンド・ショルダーズ）パターンの簡易検出。
+    # 過去3ヶ月（直近63営業日）の終値から局所的な安値（谷）を検出し、「左肩・頭・右肩」に
+    # 相当する3つの谷（中央の谷が最も深く、左右の谷の深さが近い）が形成されているかを
+    # 大まかに判定する。完璧なパターン認識ではなく簡易的な近似ロジックである点に注意。
+    inverse_hs = None
+    recent_close = close.tail(63)
+    if len(recent_close) >= 15:
+        rc_values = recent_close.values
+        window = 3
+        minima_positions = []
+        for i in range(window, len(rc_values) - window):
+            segment = rc_values[i - window : i + window + 1]
+            if rc_values[i] <= segment.min():
+                minima_positions.append(i)
+
+        # 近接した位置で重複検出された谷を間引く（同じ谷を複数回カウントしないように）
+        deduped_minima = []
+        for pos in minima_positions:
+            if not deduped_minima or pos - deduped_minima[-1] > window:
+                deduped_minima.append(pos)
+
+        # 時系列で最も古い候補から順に判定し、最後に見つかったもの（＝直近のもの）を採用する
+        for i in range(len(deduped_minima) - 2):
+            l_pos, h_pos, r_pos = deduped_minima[i], deduped_minima[i + 1], deduped_minima[i + 2]
+            l_val, h_val, r_val = rc_values[l_pos], rc_values[h_pos], rc_values[r_pos]
+            if h_val < l_val and h_val < r_val:
+                shoulder_avg = (l_val + r_val) / 2
+                shoulder_diff_ratio = abs(l_val - r_val) / shoulder_avg if shoulder_avg else 1.0
+                head_depth_l = (l_val - h_val) / l_val if l_val else 0
+                head_depth_r = (r_val - h_val) / r_val if r_val else 0
+                if shoulder_diff_ratio <= 0.15 and head_depth_l >= 0.02 and head_depth_r >= 0.02:
+                    neckline_left = rc_values[l_pos : h_pos + 1].max()
+                    neckline_right = rc_values[h_pos : r_pos + 1].max()
+                    neckline = (neckline_left + neckline_right) / 2
+                    inverse_hs = {
+                        "neckline": neckline,
+                        "neckline_broken": last_close > neckline,
+                    }
+
     lines = []
     if last_sma20 is not None:
         pos20 = "上" if above20 else "下"
@@ -1233,6 +1273,13 @@ def compute_technical_view(ticker):
         lines.append(f"MACD線はシグナル線の{macd_pos}に位置しています。")
         if macd_cross:
             lines.append(f"直近10営業日以内にMACDの{macd_cross}（MACD線とシグナル線の交差）が発生しています。")
+    if inverse_hs is not None:
+        neckline_text = "ネックライン突破済み" if inverse_hs["neckline_broken"] else "ネックライン未突破"
+        lines.append(
+            "直近のチャートに逆三尊（底値圏での反転を示唆するとされるパターン）の形成が見られます"
+            f"（確度：中、{neckline_text}／ネックライン目安${inverse_hs['neckline']:,.2f}）。"
+            "簡易ロジックによる近似判定のため、誤検出の可能性がある点にご留意ください。"
+        )
 
     if not lines:
         return None
@@ -1255,6 +1302,7 @@ def compute_technical_view(ticker):
         "macd_signal": last_signal,
         "macd_cross": macd_cross,
         "above_macd_signal": above_macd_signal,
+        "inverse_head_shoulders": inverse_hs,
     }
 
 
@@ -1331,15 +1379,22 @@ def render_stock_chart(ticker):
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         showlegend=False,
+        # dragmode="pan"にすることで、1本指ドラッグ＝パン、2本指ピンチ＝ズームという
+        # モバイル（iOS Safari/Chrome等）での標準的なジェスチャー挙動になる。
+        # scrollZoomのみの設定だと、ブラウザによってはピンチアウト（拡大）はできても
+        # ピンチイン（縮小）やパンが正しく機能しないことがあるため、明示的に指定する。
+        dragmode="pan",
     )
-    # スマホでの2本指ピンチジェスチャーによる拡大・縮小を有効にするための設定。
-    # scrollZoomはマウスホイールだけでなく、タッチデバイスでの2本指ピンチズームも
-    # 有効にする（Plotly.jsの仕様）。doubleClick="reset"で、スマホでのダブルタップ操作
-    # によりズームを元の表示範囲にリセットできるようにしている。
+    # スマホでの2本指ピンチジェスチャーによる拡大・縮小、1本指ドラッグによるパンを
+    # 有効にするための設定。scrollZoomはマウスホイールだけでなく、タッチデバイスでの
+    # 2本指ピンチズームも有効にする（Plotly.jsの仕様）。doubleClick="reset"で、スマホでの
+    # ダブルタップ操作によりズームを元の表示範囲にリセットできるようにしている。
     chart_config = {
         "scrollZoom": True,
         "doubleClick": "reset",
         "displaylogo": False,
+        "displayModeBar": True,
+        "modeBarButtonsToRemove": ["lasso2d", "select2d"],
     }
     st.plotly_chart(fig, use_container_width=True, config=chart_config)
 
