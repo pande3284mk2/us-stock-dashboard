@@ -1040,6 +1040,11 @@ def get_extended_hours_info(ticker):
         "pre_price": info.get("preMarketPrice"),
         "pre_change": info.get("preMarketChange"),
         "pre_change_pct": info.get("preMarketChangePercent"),
+        # marketState: "PRE"/"REGULAR"/"POST"/"POSTPOST"/"CLOSED" などYahoo側の
+        # 現在の市場フェーズ。「時間外データなし」が銘柄側の問題なのか、単に今が
+        # プレ/アフターマーケットの時間帯外（通常取引中や、取引時間外の深夜・週末など）
+        # なのかを区別するために使う。
+        "market_state": info.get("marketState"),
     }
 
 
@@ -1059,7 +1064,34 @@ def _render_extended_hours_caption(ticker, shares, usdjpy_rate):
     has_pre = ext is not None and ext.get("pre_price") not in (None, 0)
 
     if not (has_post or has_pre):
-        st.caption("🕒 時間外の動き: 時間外データなし（この銘柄は時間外取引データを取得できませんでした）")
+        # 「この銘柄では時間外データを取得できない」のか、「今がそもそもプレ/アフター
+        # マーケットの時間帯ではない」のかを、Yahoo側のmarketStateを見て区別する。
+        # 区別しないと、単なる時間帯の問題を「この銘柄はダメ」という誤解を招きかねない。
+        market_state = ext.get("market_state") if ext else None
+        if market_state == "REGULAR":
+            st.caption(
+                "🕒 時間外の動き: 現在は通常取引時間中です。アフターマーケットは"
+                "通常取引終了後に表示されます。"
+            )
+        elif market_state in ("PRE", "PREPRE"):
+            st.caption(
+                "🕒 時間外の動き: プレマーケットの時間帯ですが、この銘柄の気配データは"
+                "現時点では取得できませんでした（薄商いの銘柄では気配が出ないことがあります）。"
+            )
+        elif market_state in ("POST", "POSTPOST"):
+            st.caption(
+                "🕒 時間外の動き: アフターマーケットの時間帯ですが、この銘柄の気配データは"
+                "現時点では取得できませんでした（薄商いの銘柄では気配が出ないことがあります）。"
+            )
+        else:
+            # CLOSED、または市場状態そのものが取得できない場合。
+            # 通常取引・プレ・アフターのいずれの時間帯でもない（週末や深夜など）ため、
+            # 時間外データが存在しないのは仕様通りであり、銘柄側の問題ではないことが多い。
+            st.caption(
+                "🕒 時間外の動き: 現在は市場が完全に閉じている時間帯（プレ/アフターマーケットの"
+                "取引時間外）のため、時間外データはありません。プレマーケット開始後、または"
+                "通常取引終了後に再度ご確認ください。"
+            )
         return
 
     if has_post:
