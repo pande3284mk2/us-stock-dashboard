@@ -1,24 +1,22 @@
 name: Portfolio Email Alert
 
-# ポートフォリオ（保有株）の時間外・プレマーケットの値動きを、30分おきに
+# ポートフォリオ（保有株）の時間外・プレマーケットの値動きを、5分おきに
 # チェックしてメールでお知らせするワークフロー。
 # GitHub Actions（GitHubが無料で提供している「決まった時刻に自動でプログラムを
 # 実行してくれる仕組み」）を使い、PCやアプリを閉じていても実行される。
 #
 # 通知のルール（scripts/portfolio_email_alert.py 側で判定）:
-#   ・毎時0分・30分の実行のたび、必ず前日比±3%以上動いた銘柄がないかチェックし、
-#     あれば即アラートメールを送る。
+#   ・5分ごと（毎時0,5,10,15,20,25,30,35,40,45,50,55分）の実行のたび、
+#     必ず前日比±3%以上動いた銘柄がないかチェックし、あれば即アラートメールを送る。
 #   ・毎時30分の実行のときだけ、値動きに関係なく、保有銘柄全体の
 #     定時サマリーメールも必ず送る。
 #   → 毎時30分は「定時サマリー」＋「（該当あれば）アラート」の2通が届く場合がある。
-#      毎時0分は「（該当あれば）アラート」のみ。
+#      それ以外の5分刻みの実行は「（該当あれば）アラート」のみ。
 
 on:
   schedule:
-    # 毎時0分（UTC基準。GitHub Actionsのスケジュールは世界標準時で指定する）
-    - cron: "0 * * * *"
-    # 毎時30分
-    - cron: "30 * * * *"
+    # 5分おき（UTC基準。GitHub Actionsのスケジュールは世界標準時で指定する）
+    - cron: "*/5 * * * *"
   # GitHubの「Actions」画面から手動で今すぐ実行したい時のためのボタンも用意しておく。
   workflow_dispatch:
     inputs:
@@ -48,17 +46,19 @@ jobs:
           pip install yfinance
 
       - name: Determine whether this run is the 30-minute summary run
-        # github.event.schedule には、実際にトリガーされたcronの文字列
-        # （"0 * * * *" または "30 * * * *"）がそのまま入る。
-        # これを見て「毎時30分の実行かどうか」を IS_SUMMARY_RUN という
-        # 環境変数に変換し、以降のステップに引き継ぐ。
+        # 5分おきの単一cron（*/5 * * * *）だけでは「今が毎時30分の実行か」を
+        # 区別できないため、実行時刻（UTC・分）を直接調べて判定する。
+        # 手動実行（workflow_dispatch）の場合は、入力欄 run_as_summary の値を使う。
         run: |
-          if [ "${{ github.event.schedule }}" = "30 * * * *" ]; then
-            echo "IS_SUMMARY_RUN=true" >> "$GITHUB_ENV"
-          elif [ "${{ github.event.schedule }}" = "0 * * * *" ]; then
-            echo "IS_SUMMARY_RUN=false" >> "$GITHUB_ENV"
-          else
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "IS_SUMMARY_RUN=${{ github.event.inputs.run_as_summary }}" >> "$GITHUB_ENV"
+          else
+            CURRENT_MINUTE=$(date -u +%M)
+            if [ "$CURRENT_MINUTE" = "30" ]; then
+              echo "IS_SUMMARY_RUN=true" >> "$GITHUB_ENV"
+            else
+              echo "IS_SUMMARY_RUN=false" >> "$GITHUB_ENV"
+            fi
           fi
 
       - name: Run portfolio email alert script
