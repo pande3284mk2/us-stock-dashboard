@@ -2895,7 +2895,7 @@ def render_extended_hours_summary(holdings, usdjpy_rate):
                 state_label = "アフターマーケット中（気配データなし）"
             else:
                 state_label = "市場閉場中（時間外データなし）"
-            rows.append({"銘柄": ticker, "状況": state_label, "変化率": "-", "円換算": "-"})
+            rows.append({"銘柄": ticker, "状況": state_label, "変化率": "対象外", "円換算": "対象外"})
             continue
 
         prev_close = ext.get("previous_close")
@@ -2903,13 +2903,13 @@ def render_extended_hours_summary(holdings, usdjpy_rate):
             ext_change = ext_price - prev_close
             ext_change_pct = (ext_price / prev_close - 1) * 100 if prev_close else None
 
-        pct_text = f"{ext_change_pct:+.2f}%" if ext_change_pct is not None else "-"
+        pct_text = f"{ext_change_pct:+.2f}%" if ext_change_pct is not None else "対象外"
         if ext_change is not None and usdjpy_rate:
             jpy_change = ext_change * shares * usdjpy_rate
             jpy_text = f"約{jpy_change:+,.0f}円"
             total_jpy_change += jpy_change
         else:
-            jpy_text = "-"
+            jpy_text = "対象外"
         rows.append({"銘柄": ticker, "状況": state_label, "変化率": pct_text, "円換算": jpy_text})
 
         # 合計・加重平均変化率の算出用（時間外データが実際に取得できた銘柄のみを対象とする）。
@@ -2927,8 +2927,8 @@ def render_extended_hours_summary(holdings, usdjpy_rate):
         weighted_pct_text = f"{weighted_pct:+.2f}%"
         total_jpy_text = f"約{total_jpy_change:+,.0f}円"
     else:
-        weighted_pct_text = "-"
-        total_jpy_text = "-"
+        weighted_pct_text = "対象外"
+        total_jpy_text = "対象外"
 
     rows.append({"銘柄": "合計", "状況": "", "変化率": weighted_pct_text, "円換算": total_jpy_text})
 
