@@ -1332,7 +1332,16 @@ def render_stock_chart(ticker):
         plot_bgcolor="rgba(0,0,0,0)",
         showlegend=False,
     )
-    st.plotly_chart(fig, use_container_width=True)
+    # スマホでの2本指ピンチジェスチャーによる拡大・縮小を有効にするための設定。
+    # scrollZoomはマウスホイールだけでなく、タッチデバイスでの2本指ピンチズームも
+    # 有効にする（Plotly.jsの仕様）。doubleClick="reset"で、スマホでのダブルタップ操作
+    # によりズームを元の表示範囲にリセットできるようにしている。
+    chart_config = {
+        "scrollZoom": True,
+        "doubleClick": "reset",
+        "displaylogo": False,
+    }
+    st.plotly_chart(fig, use_container_width=True, config=chart_config)
 
 
 def _theme_institutional_overlap(theme_name):
