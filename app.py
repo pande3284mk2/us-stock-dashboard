@@ -2341,7 +2341,7 @@ def render_portfolio_assessment(holdings_with_price, period_key):
 
         # --- 日足チャート ---
         chart_note = f"（本体銘柄「{analysis_ticker}」のチャートを表示）" if is_alias else ""
-        st.markdown(f"**📈 {ticker} 日足チャート（直近6ヶ月）**{chart_note}")
+        st.markdown(f"**📈 {ticker} 日足チャート（直近3ヶ月）**{chart_note}")
         render_stock_chart(analysis_ticker)
 
         # --- ポジション調整の両論併記 ---
