@@ -1352,8 +1352,11 @@ def render_fundamentals_text(ticker):
 
 
 def render_stock_chart(ticker):
-    """保有銘柄の日足チャート（ローソク足、直近3ヶ月）を表示する。"""
-    hist = get_stock_history(ticker, "3mo")
+    """保有銘柄の日足チャート（ローソク足）を表示する。
+    データ自体は直近2年分を取得し、初期表示範囲だけを直近3ヶ月に絞ることで、
+    ユーザーがズームアウト/パン操作で過去2年分まで遡って確認できるようにしている。
+    """
+    hist = get_stock_history(ticker, "2y")
     if hist is None or hist.empty:
         st.caption(f"{ticker}のチャートデータを取得できませんでした。")
         return
@@ -1371,6 +1374,16 @@ def render_stock_chart(ticker):
             )
         ]
     )
+
+    # 初期表示範囲は直近3ヶ月（約63営業日）分に絞る。データ自体は2年分保持しているので、
+    # ユーザーがズームアウト/パンすれば過去に遡って表示できる。
+    recent_hist = hist.tail(63)
+    x_start = recent_hist.index.min()
+    x_end = hist.index.max()
+    y_pad = (recent_hist["High"].max() - recent_hist["Low"].min()) * 0.05
+    y_min = recent_hist["Low"].min() - y_pad
+    y_max = recent_hist["High"].max() + y_pad
+
     fig.update_layout(
         template="plotly_dark",
         height=320,
@@ -1379,16 +1392,20 @@ def render_stock_chart(ticker):
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         showlegend=False,
-        # dragmode="pan"にすることで、1本指ドラッグ＝パン、2本指ピンチ＝ズームという
-        # モバイル（iOS Safari/Chrome等）での標準的なジェスチャー挙動になる。
-        # scrollZoomのみの設定だと、ブラウザによってはピンチアウト（拡大）はできても
-        # ピンチイン（縮小）やパンが正しく機能しないことがあるため、明示的に指定する。
+        # dragmode="pan"により1本指ドラッグ＝パンという標準的な挙動になる。
+        # なお、Plotly.js自体の既知の制約として、dragmode="pan"の場合は
+        # スマホでの2本指ピンチによるズームジェスチャーが機能しないことが
+        # Plotly公式コミュニティでも報告されている（2Dチャートでのピンチズーム自体が
+        # ライブラリとして未対応）。そのため、ズームはモードバーの拡大/縮小ボタン
+        # （虫眼鏡アイコン）をタップする操作を主な手段として案内している。
         dragmode="pan",
     )
-    # スマホでの2本指ピンチジェスチャーによる拡大・縮小、1本指ドラッグによるパンを
-    # 有効にするための設定。scrollZoomはマウスホイールだけでなく、タッチデバイスでの
-    # 2本指ピンチズームも有効にする（Plotly.jsの仕様）。doubleClick="reset"で、スマホでの
-    # ダブルタップ操作によりズームを元の表示範囲にリセットできるようにしている。
+    fig.update_xaxes(range=[x_start, x_end])
+    fig.update_yaxes(range=[y_min, y_max])
+
+    # scrollZoomはマウスホイール/トラックパッドでのズームを有効にする設定。
+    # displayModeBarをTrueにして拡大(+)/縮小(-)/リセットのボタンを常時表示し、
+    # スマホでのピンチズームが効かない場合でもボタンタップで拡大・縮小できるようにしている。
     chart_config = {
         "scrollZoom": True,
         "doubleClick": "reset",
@@ -2396,7 +2413,7 @@ def render_portfolio_assessment(holdings_with_price, period_key):
 
         # --- 日足チャート ---
         chart_note = f"（本体銘柄「{analysis_ticker}」のチャートを表示）" if is_alias else ""
-        st.markdown(f"**📈 {ticker} 日足チャート（直近3ヶ月）**{chart_note}")
+        st.markdown(f"**📈 {ticker} 日足チャート（初期表示は直近3ヶ月、ズームアウトで過去2年まで遡り可能）**{chart_note}")
         render_stock_chart(analysis_ticker)
 
         # --- ポジション調整の両論併記 ---
