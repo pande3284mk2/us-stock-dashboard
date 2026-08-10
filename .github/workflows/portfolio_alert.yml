@@ -17,11 +17,15 @@ name: Portfolio Email Alert
 # 「前回チェック時の価格」は data/last_check_prices.json に保存し、実行の
 # 最後にこのワークフローがリポジトリへコミットし直す（このためリポジトリへの
 # 書き込み権限 contents: write が必要）。
+#
+# ［2026-08-10 追記］毎時0分ちょうどはGitHub Actions全体で実行が混雑し、
+# スケジュール実行が遅延しやすいとGitHub公式ドキュメントに記載されているため、
+# 実行タイミングを毎時2,7,12,17,22,27,32,37,42,47,52,57分にずらしている。
 
 on:
   schedule:
-    # 5分おき（UTC基準。GitHub Actionsのスケジュールは世界標準時で指定する）
-    - cron: "*/5 * * * *"
+    # 5分おき・毎時0分ジャストを避けて2分オフセット（UTC基準）
+    - cron: "2-59/5 * * * *"
   # GitHubの「Actions」画面から手動で今すぐ実行したい時のためのボタンも用意しておく。
   workflow_dispatch:
     inputs:
@@ -58,7 +62,7 @@ jobs:
           pip install yfinance
 
       - name: Determine whether this run is the 30-minute summary run
-        # 5分おきの単一cron（*/5 * * * *）だけでは「今が毎時30分の実行か」を
+        # 5分おきの単一cron（2-59/5 * * * *）だけでは「今が毎時30分の実行か」を
         # 区別できないため、実行時刻（UTC・分）を直接調べて判定する。
         # 手動実行（workflow_dispatch）の場合は、入力欄 run_as_summary の値を使う。
         run: |
