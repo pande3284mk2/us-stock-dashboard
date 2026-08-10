@@ -7,11 +7,16 @@ name: Portfolio Email Alert
 #
 # 通知のルール（scripts/portfolio_email_alert.py 側で判定）:
 #   ・5分ごと（毎時0,5,10,15,20,25,30,35,40,45,50,55分）の実行のたび、
-#     必ず前日比±3%以上動いた銘柄がないかチェックし、あれば即アラートメールを送る。
+#     「前回チェック（5分前）の価格」からの変化率が±3%以上なら、その場で
+#     アラートメールを送る（前日終値ではなく、直近の5分前比較）。
 #   ・毎時30分の実行のときだけ、値動きに関係なく、保有銘柄全体の
-#     定時サマリーメールも必ず送る。
+#     定時サマリーメール（前日終値からの変化率）も必ず送る。
 #   → 毎時30分は「定時サマリー」＋「（該当あれば）アラート」の2通が届く場合がある。
 #      それ以外の5分刻みの実行は「（該当あれば）アラート」のみ。
+#
+# 「前回チェック時の価格」は data/last_check_prices.json に保存し、実行の
+# 最後にこのワークフローがリポジトリへコミットし直す（このためリポジトリへの
+# 書き込み権限 contents: write が必要）。
 
 on:
   schedule:
@@ -26,7 +31,14 @@ on:
         default: "false"
 
 permissions:
-  contents: read
+  contents: write
+
+# 5分間隔の実行が万一重なった場合に、data/last_check_prices.json への
+# 書き込みが衝突しないよう、同時には1つの実行だけが動くようにする
+# （前の実行が終わるまで次の実行は待たされる。取りこぼしにはならない）。
+concurrency:
+  group: portfolio-alert
+  cancel-in-progress: false
 
 jobs:
   check-and-notify:
@@ -67,3 +79,17 @@ jobs:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           IS_SUMMARY_RUN: ${{ env.IS_SUMMARY_RUN }}
         run: python scripts/portfolio_email_alert.py
+
+      - name: Commit updated last-check prices
+        # data/last_check_prices.json が変化していればコミットし直す。
+        # このファイルは次回5分後の実行が「前回価格」として読み込む。
+        run: |
+          if [ -n "$(git status --porcelain data/last_check_prices.json)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add data/last_check_prices.json
+            git commit -m "Update last-check prices"
+            git push
+          else
+            echo "変更なし。コミットは行いません。"
+          fi
