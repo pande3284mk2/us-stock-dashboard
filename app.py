@@ -202,6 +202,52 @@ THEME_STOCKS = {
     "メディア/エンタメ": ["DIS", "NFLX", "WBD"],
 }
 
+# ヒートマップ（全体構造の俯瞰表示）用：27テーマを大分類でグルーピングする。
+# ランキングではなく「どのカテゴリが強くてどのカテゴリが弱いか」を一目で把握するために使う。
+THEME_CATEGORIES = {
+    "テクノロジー系": [
+        "半導体", "メモリー", "量子コンピューティング", "光/フォトニクス",
+        "AIインフラ/データセンター", "ソフトウェア/SaaS", "サイバーセキュリティ",
+    ],
+    "ヘルスケア系": ["バイオテック", "医療機器", "デジタルヘルス", "製薬大手", "肥満症治療薬(GLP-1)"],
+    "金融系": ["大手銀行", "フィンテック", "保険", "暗号資産関連株"],
+    "消費系": ["Eコマース", "外食", "アパレル/小売", "自動車/EV"],
+    "エネルギー・素材系": ["石油ガス", "再生可能エネルギー", "電池材料/リチウム", "貴金属/鉱業"],
+    "その他": ["防衛/航空宇宙", "通信キャリア", "メディア/エンタメ"],
+}
+
+# ヒートマップのセル表示用：狭い画面幅でも文字が重ならないよう、テーマ名を2〜6文字程度に短縮したもの。
+# フルネームはホバー時にツールチップで表示する。
+THEME_SHORT_NAMES = {
+    "半導体": "半導体",
+    "メモリー": "メモリ",
+    "量子コンピューティング": "量子",
+    "光/フォトニクス": "光学",
+    "AIインフラ/データセンター": "AIインフラ",
+    "ソフトウェア/SaaS": "SaaS",
+    "サイバーセキュリティ": "セキュリティ",
+    "バイオテック": "バイオ",
+    "医療機器": "医療機器",
+    "デジタルヘルス": "デジタル医療",
+    "製薬大手": "製薬",
+    "肥満症治療薬(GLP-1)": "GLP-1",
+    "大手銀行": "銀行",
+    "フィンテック": "フィンテック",
+    "保険": "保険",
+    "暗号資産関連株": "暗号資産",
+    "Eコマース": "EC",
+    "外食": "外食",
+    "アパレル/小売": "小売",
+    "自動車/EV": "EV",
+    "石油ガス": "石油",
+    "再生可能エネルギー": "再エネ",
+    "電池材料/リチウム": "電池",
+    "貴金属/鉱業": "鉱業",
+    "防衛/航空宇宙": "防衛",
+    "通信キャリア": "通信",
+    "メディア/エンタメ": "メディア",
+}
+
 # 主要指数・資産カード
 INDEX_TICKERS = {
     "ダウ30": ("^DJI", "💵"),
@@ -932,8 +978,8 @@ def compute_technical_view(ticker):
         return None
 
     text = "テクニカル的には、" + "".join(lines)
-    text = text.replace("¥VAL20", f"${last_sma20:,.2f}" if last_sma20 is not None else "-")
-    text = text.replace("¥VAL50", f"${last_sma50:,.2f}" if last_sma50 is not None else "-")
+    text = text.replace("¥VAL20", f"${{last_sma20:,.2f}" if last_sma20 is not None else "-")
+    text = text.replace("¥VAL50", f"${{last_sma50:,.2f}" if last_sma50 is not None else "-")
 
     return {
         "text": text,
@@ -987,7 +1033,7 @@ def render_fundamentals_text(ticker):
         (f"時価総額: ¥MC" if mc else "時価総額: データなし"),
     ]
     text = " ／ ".join(parts)
-    text = text.replace("¥MC", f"${mc / 1e9:,.1f}B" if mc else "")
+    text = text.replace("¥MC", f"${{mc / 1e9:,.1f}B" if mc else "")
     return text
 
 
@@ -1053,7 +1099,6 @@ def classify_commentary_themes(commentary_data):
 
 # =====================================================
 # 画面表示用の補助関数
-# =====================================================
 
 def render_index_cards(period_key):
     cfg = PERIOD_OPTIONS[period_key]
@@ -1137,7 +1182,7 @@ def render_sector_strength(period_key):
                         last_price = stk_close.dropna().iloc[-1]
                         st.metric(
                             label=stk,
-                            value=f"${last_price:,.2f}",
+                            value=f"${{last_price:,.2f}",
                             delta=f"{stk_chg:+.2f}%",
                         )
 
@@ -1187,48 +1232,104 @@ def compute_theme_ranking(period_key):
 
 
 def render_theme_heatmap(df):
-    """27テーマの騰落率をヒートマップで俯瞰できるようにする（棒グラフの補助表示）。
+    """27テーマを大分類（テクノロジー系・ヘルスケア系など）でグルーピングした横長の
+    格子状ヒートマップとして表示する。これはランキングではなく、「どの大分類が強くて
+    どの大分類が弱いか」という全体の構造を一目で俯瞰するための表示である。
 
-    スマホ等の狭い画面幅でもラベル文字が重ならないよう、テーマを横方向に複数列並べる
-    格子状レイアウトはやめ、縦1列のリスト型（y軸にテーマ名、x軸は「スコア」1列だけ）に
-    している。横幅に依存しないため、画面幅が375px程度のスマホでも文字が重ならない。
+    横軸=大分類、縦軸=各分類内での相対順位（強い順）というレイアウトにすることで、
+    PC・スマホともに横長のレイアウトを維持できるようにしている。狭い画面幅でも文字が
+    重ならないよう、テーマ名は2〜6文字程度に短縮表示し、フルネームと正確なスコアは
+    ホバー時のツールチップで確認できるようにしている。
     """
     if df.empty:
         return
-    df_sorted = df.reset_index(drop=True)
-    n = len(df_sorted)
-    grid_z = [[row["騰落率"]] for _, row in df_sorted.iterrows()]
-    grid_text = [
-        [f"{row['テーマ名']}　{row['騰落率']:+.2f}%"] for _, row in df_sorted.iterrows()
-    ]
+    score_map = dict(zip(df["テーマ名"], df["騰落率"]))
+    categories = list(THEME_CATEGORIES.keys())
+    max_rows = max(len(v) for v in THEME_CATEGORIES.values())
+
+    nan = float("nan")
+    grid_z = [[nan for _ in categories] for _ in range(max_rows)]
+    grid_text = [["" for _ in categories] for _ in range(max_rows)]
+    grid_full = [["" for _ in categories] for _ in range(max_rows)]
+
+    for c_idx, cat in enumerate(categories):
+        theme_names = THEME_CATEGORIES[cat]
+        ranked = sorted(
+            (t for t in theme_names if t in score_map),
+            key=lambda t: score_map[t],
+            reverse=True,
+        )
+        for r_idx, theme_name in enumerate(ranked):
+            score = score_map[theme_name]
+            short = THEME_SHORT_NAMES.get(theme_name, theme_name[:3])
+            grid_z[r_idx][c_idx] = score
+            grid_text[r_idx][c_idx] = f"{short}<br>{score:+.1f}%"
+            grid_full[r_idx][c_idx] = f"{theme_name}: {score:+.2f}%"
 
     fig = px.imshow(
         grid_z,
         color_continuous_scale="RdYlGn",
         color_continuous_midpoint=0,
         aspect="auto",
+        x=categories,
     )
     fig.update_traces(
         text=grid_text,
         texttemplate="%{text}",
-        textfont_size=12,
+        textfont_size=10,
+        customdata=grid_full,
+        hovertemplate="%{customdata}<extra></extra>",
     )
     fig.update_layout(
         template="plotly_dark",
-        height=26 * n + 40,
-        margin=dict(l=10, r=10, t=20, b=10),
+        height=42 * max_rows + 80,
+        margin=dict(l=10, r=10, t=40, b=10),
         paper_bgcolor="rgba(0,0,0,0)",
-        xaxis_visible=False,
         yaxis_visible=False,
+        xaxis=dict(side="top", tickfont=dict(size=11)),
         coloraxis_colorbar=dict(title="騰落率(%)"),
     )
     st.plotly_chart(fig, use_container_width=True)
+    st.caption(
+        "横軸は大分類（テクノロジー系・ヘルスケア系など）、各列内は上ほどそのカテゴリ内で"
+        "相対的に強いテーマです。色が濃い緑ほど強く、濃い赤ほど弱いことを示します。"
+        "セルにカーソルを合わせるとテーマのフルネームと正確なスコアを確認できます。"
+    )
+
+
+def _theme_bar_fig(sub_df):
+    """テーマ強弱ランキングの一部（Top15またはWorst10）を横棒グラフにする内部用ヘルパー。"""
+    fig = go.Figure(
+        go.Bar(
+            x=sub_df["騰落率"],
+            y=sub_df["テーマ名"],
+            orientation="h",
+            marker_color=["#00cc96" if v >= 0 else "#ef553b" for v in sub_df["騰落率"]],
+            text=[f"{v:+.2f}%" for v in sub_df["騰落率"]],
+            textposition="outside",
+            customdata=sub_df["構成銘柄"],
+            hovertemplate="<b>%{y}</b><br>平均騰落率: %{x:+.2f}%<br>構成銘柄: %{customdata}<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        template="plotly_dark",
+        height=max(320, 34 * len(sub_df) + 60),
+        xaxis_title="平均騰落率 (%)",
+        yaxis=dict(autorange="reversed"),
+        margin=dict(l=10, r=30, t=20, b=10),
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        showlegend=False,
+    )
+    return fig
 
 
 def render_theme_strength(period_key):
     """セクターより細かい「テーマ」単位（半導体・AIインフラなど）の強弱ランキングを、
-    このダッシュボードの主役セクションとして表示する。各テーマは展開すると
-    代表銘柄ごとの個別スコア（価格・騰落率）も確認できる。
+    このダッシュボードの主役セクションとして表示する。27テーマ全件ではなく、
+    「🟢 強いテーマ Top15」「🔴 弱いテーマ Worst10」の2グループに絞って表示し、
+    間の順位のテーマは表示しない。各テーマは展開すると代表銘柄ごとの個別スコアも確認できる。
+    続けて、全27テーマを大分類でグルーピングしたヒートマップ（全体構造の俯瞰用）を表示する。
     """
     df = compute_theme_ranking(period_key)
     if df.empty:
@@ -1238,39 +1339,24 @@ def render_theme_strength(period_key):
     price_data = _theme_price_data(period_key)
     cfg = PERIOD_OPTIONS[period_key]
 
-    fig = go.Figure(
-        go.Bar(
-            x=df["騰落率"],
-            y=df["テーマ名"],
-            orientation="h",
-            marker_color=["#00cc96" if v >= 0 else "#ef553b" for v in df["騰落率"]],
-            text=[f"{v:+.2f}%" for v in df["騰落率"]],
-            textposition="outside",
-            customdata=df["構成銘柄"],
-            hovertemplate="<b>%{y}</b><br>平均騰落率: %{x:+.2f}%<br>構成銘柄: %{customdata}<extra></extra>",
-        )
-    )
-    fig.update_layout(
-        template="plotly_dark",
-        height=800,
-        xaxis_title="平均騰落率 (%)",
-        yaxis=dict(autorange="reversed"),
-        margin=dict(l=10, r=30, t=20, b=10),
-        plot_bgcolor="rgba(0,0,0,0)",
-        paper_bgcolor="rgba(0,0,0,0)",
-        showlegend=False,
-    )
-    st.plotly_chart(fig, use_container_width=True)
+    top_df = df.head(15)
+    remaining_df = df[~df["テーマ名"].isin(top_df["テーマ名"])]
+    bottom_df = remaining_df.tail(10)
+
+    st.markdown("**🟢 強いテーマ Top15**")
+    st.plotly_chart(_theme_bar_fig(top_df), use_container_width=True)
+
+    st.markdown("**🔴 弱いテーマ Worst10**")
+    st.plotly_chart(_theme_bar_fig(bottom_df), use_container_width=True)
+
     st.caption(
         "各テーマの代表銘柄（3〜5銘柄）の期間内騰落率を単純平均したスコアです。"
-        "バーにカーソルを合わせると構成銘柄を確認できます。"
+        "バーにカーソルを合わせると構成銘柄を確認できます。間の順位のテーマは表示していません。"
     )
 
-    st.markdown("**🟩🟥 ヒートマップ表示**")
-    render_theme_heatmap(df)
-
     st.caption("テーマごとの代表銘柄別スコアを見るには、下の項目をクリックして展開してください。")
-    for _, row in df.iterrows():
+    display_df = pd.concat([top_df, bottom_df])
+    for _, row in display_df.iterrows():
         theme_name = row["テーマ名"]
         stocks = THEME_STOCKS.get(theme_name, [])
         if not stocks:
@@ -1287,9 +1373,12 @@ def render_theme_strength(period_key):
                         last_price = stk_close.dropna().iloc[-1]
                         st.metric(
                             label=stk,
-                            value=f"${last_price:,.2f}",
+                            value=f"${{last_price:,.2f}",
                             delta=f"{stk_chg:+.2f}%",
                         )
+
+    st.markdown("**🗺️ 全体構造ヒートマップ（大分類別）**")
+    render_theme_heatmap(df)
 
 
 def render_cluster_buys():
@@ -1305,6 +1394,7 @@ def render_cluster_buys():
     st.caption(f"直近の複数役員による同時期の自社株購入（上位{len(df)}件）")
     for _, row in df.iterrows():
         ticker = row.get("Ticker", "-")
+        company = row.get("Company Name", "-")
         company = row.get("Company Name", "-")
         trade_date = row.get("Trade Date", "-")
         value = row.get("Value", "-")
@@ -1547,7 +1637,7 @@ def render_portfolio_holdings(period_key):
         with cols[0]:
             st.metric("銘柄", h["ticker"])
         with cols[1]:
-            st.metric("取得単価", f"${h['cost_basis']:,.2f}")
+            st.metric("取得単価", f"${{h['cost_basis']:,.2f}")
         if current_price is None:
             with cols[2]:
                 st.metric("現在値", "取得失敗")
@@ -1559,11 +1649,11 @@ def render_portfolio_holdings(period_key):
             with cols[2]:
                 st.metric(
                     "現在値",
-                    f"${current_price:,.2f}",
+                    f"${{current_price:,.2f}",
                     delta=f"{period_chg:+.2f}%" if period_chg is not None else None,
                 )
             with cols[3]:
-                pl_value_text = f"${pl_amount:,.2f}"
+                pl_value_text = f"${{pl_amount:,.2f}"
                 if usdjpy_rate:
                     pl_amount_jpy = pl_amount * usdjpy_rate
                     pl_value_text += f"（約{pl_amount_jpy / 10000:+.1f}万円）"
@@ -1741,7 +1831,7 @@ def render_investment_consideration(holdings_with_price, period_key, commentary_
     if cash_jpy > 0:
         cash_note = f"現在登録されている預り金は約{cash_jpy:,.0f}円です。"
         if usdjpy_rate:
-            cash_note += f"（1ドル={usdjpy_rate:,.2f}円換算で約${cash_jpy / usdjpy_rate:,.2f}相当）"
+            cash_note += f"（1ドル={usdjpy_rate:,.2f}円換算で約${{cash_jpy / usdjpy_rate:,.2f}相当）"
     else:
         cash_note = "現在、預り金は登録されていません。"
 
@@ -2166,12 +2256,72 @@ def render_recent_news_widget():
     st.caption("詳しくは「📰 ニュースアーカイブ」ページをご覧ください。")
 
 
+def render_portfolio_related_news():
+    """news_archive.jsonのentriesの中から、現在のポートフォリオ保有銘柄が属するテーマに
+    関連するニュース（relevance_themesと保有銘柄のテーマが一致するもの）だけを抽出して表示する。
+
+    ポートフォリオが未登録の場合や、該当するニュースが無い場合はその旨を案内する。
+    各ニュースには、どの保有銘柄のどのテーマに関連しているかを一言添える。
+    """
+    holdings = _current_portfolio_holdings()
+    entries = get_news_archive()
+    if not holdings or not entries:
+        st.info("現在、保有銘柄に直接関連するニュースはありません。")
+        return
+
+    # 保有銘柄ごとに、属するテーマ名とその根拠となったティッカーを紐付ける
+    theme_to_tickers = {}
+    for h in holdings:
+        analysis_ticker = resolve_analysis_ticker(h["ticker"])
+        for theme_name in _find_theme_for_ticker(analysis_ticker):
+            theme_to_tickers.setdefault(theme_name, []).append(h["ticker"])
+
+    if not theme_to_tickers:
+        st.info("現在、保有銘柄に直接関連するニュースはありません。")
+        return
+
+    matched = []
+    for e in entries:
+        hit_themes = [t for t in e.get("relevance_themes", []) if t in theme_to_tickers]
+        if hit_themes:
+            matched.append((e, hit_themes))
+
+    if not matched:
+        st.info("現在、保有銘柄に直接関連するニュースはありません。")
+        return
+
+    matched.sort(key=lambda m: m[0].get("date", ""), reverse=True)
+    for e, hit_themes in matched:
+        headline = e.get("headline", "")
+        summary = e.get("summary", "")
+        date_str = e.get("date", "")
+        src = e.get("source_url")
+        src_html = (
+            f' <a href="{src}" target="_blank" style="color:#7dd3fc;">[出典]</a>' if src else ""
+        )
+        reasons = []
+        for t in hit_themes:
+            tickers = "、".join(sorted(set(theme_to_tickers[t])))
+            reasons.append(f"保有銘柄{tickers}が属する「{t}」テーマに関連しています。")
+        reason_text = " ".join(reasons)
+        st.markdown(
+            f'<div class="insight-box"><b>{headline}</b>{src_html}<br>{summary}<br>'
+            f'<span class="small-note">{date_str}</span><br>'
+            f'<span class="small-note">💡 このニュースは、{reason_text}</span></div>',
+            unsafe_allow_html=True,
+        )
+
+
 def render_news_archive_page():
-    """「📰 ニュースアーカイブ」ページ：Google Newsのリアルタイム簡易ニュースと、
-    日次の自動更新タスク側で厳選・蓄積しているニュースアーカイブをまとめて表示する。
+    """「📰 ニュースアーカイブ」ページ：保有銘柄関連ニュース・Google Newsのリアルタイム
+    簡易ニュース・日次の自動更新タスク側で厳選・蓄積しているニュースアーカイブをまとめて表示する。
     """
     st.title("📰 ニュースアーカイブ")
     st.caption("経済ニュースのリアルタイム簡易検索と、日次で厳選・蓄積しているニュースアーカイブをまとめて確認できます。")
+
+    st.markdown('<div class="section-title">📌 保有銘柄関連ニュース</div>', unsafe_allow_html=True)
+    st.caption("あなたのマイポートフォリオの保有銘柄が属するテーマに関連するニュースだけを抽出しています。")
+    render_portfolio_related_news()
 
     st.markdown('<div class="section-title">🔴 リアルタイム簡易ニュース</div>', unsafe_allow_html=True)
     st.caption(
