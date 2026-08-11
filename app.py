@@ -421,6 +421,12 @@ COMMENTARY_URL = (
 NEWS_ARCHIVE_URL = (
     "https://raw.githubusercontent.com/pande3284mk2/us-stock-dashboard/main/news_archive.json"
 )
+# ニュースアーカイブページを最後に訪れた日時（UTC）を記録しておくための小さなファイル。
+# portfolio.jsonと同じ要領で、GitHub Contents API経由で読み書きする。
+GITHUB_NEWS_VIEWED_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/contents/news_last_viewed.json"
+NEWS_LAST_VIEWED_RAW_URL = (
+    "https://raw.githubusercontent.com/pande3284mk2/us-stock-dashboard/main/news_last_viewed.json"
+)
 
 # 「📰 ニュースアーカイブ」ページのリアルタイム簡易ニュースで検索する経済関連キーワード。
 # Google Newsの検索RSS（アカウント登録・APIキー不要・無料）を利用する。
@@ -768,6 +774,59 @@ def get_news_archive():
         return data.get("entries", [])
     except Exception:
         return None
+
+
+def get_news_last_viewed():
+    """前回このアプリで「📰 ニュースアーカイブ」ページを訪れた日時（UTC, ISO8601文字列）を
+    GitHub上のnews_last_viewed.jsonから取得する。まだ一度も記録されていない場合はNoneを返す。
+    """
+    try:
+        resp = requests.get(NEWS_LAST_VIEWED_RAW_URL, timeout=15)
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("last_viewed")
+    except Exception:
+        return None
+
+
+def save_news_last_viewed(timestamp_str):
+    """ニュースアーカイブページを訪れた日時（UTC, ISO8601文字列）を、GitHub上の
+    news_last_viewed.jsonに保存する。portfolio.jsonの保存処理と同じ、GitHub Contents APIの
+    GET（既存sha取得）→PUT（新規作成/更新）というパターンで書き込む。
+    GitHubトークン未設定や通信エラー時は、画面をエラーにせず静かに諦める
+    （この場合は未読/既読の判定が更新されないだけで、閲覧自体には影響しない）。
+    """
+    token = _get_github_token()
+    if not token:
+        return False
+    try:
+        sha = None
+        get_resp = requests.get(GITHUB_NEWS_VIEWED_API_URL, headers=_github_headers(), timeout=15)
+        if get_resp.status_code == 200:
+            sha = get_resp.json().get("sha")
+
+        content_str = json.dumps({"last_viewed": timestamp_str}, ensure_ascii=False, indent=2)
+        content_b64 = base64.b64encode(content_str.encode("utf-8")).decode("utf-8")
+
+        put_payload = {
+            "message": "Update news_last_viewed.json via dashboard",
+            "content": content_b64,
+        }
+        if sha:
+            put_payload["sha"] = sha
+
+        put_resp = requests.put(
+            GITHUB_NEWS_VIEWED_API_URL,
+            headers=_github_headers(),
+            json=put_payload,
+            timeout=15,
+        )
+        put_resp.raise_for_status()
+        return True
+    except Exception:
+        return False
 
 
 def _confidence_class(confidence):
@@ -2767,18 +2826,39 @@ def render_news_archive_page():
                     )
 
     st.markdown('<div class="section-title">🗂️ 蓄積ニュースアーカイブ</div>', unsafe_allow_html=True)
-    st.caption("日次の自動更新タスクで、重要と判断されたニュースを厳選して積み上げているアーカイブです。")
+    st.caption(
+        "日次の自動更新タスクで、重要と判断されたニュースを厳選して積み上げているアーカイブです。"
+        "🆕は本日追加されたニュース、青枠は前回このページを訪れて以降の未読ニュースです。"
+    )
     entries = get_news_archive()
     if not entries:
         st.info("📭 まだ蓄積されたニュースがありません。")
         return
+
+    # 「本日追加（🆕）」と「前回訪問以降の未読」の判定。
+    # 未読判定は、GitHub上のnews_last_viewed.jsonに記録した「前回このページを開いた日時」より
+    # 新しい日付（date）のエントリを未読として扱う、という日付単位の簡易的な比較で行っている
+    # （news_archive.json側のエントリは日付のみで時刻情報を持たないため）。
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    last_viewed_str = get_news_last_viewed()
+    last_viewed_date = last_viewed_str[:10] if last_viewed_str else None
+
+    # このセッション内で1回だけ、現在時刻を「最終閲覧日時」としてGitHubに記録する。
+    # session_stateでガードしないと、期間切替や折りたたみ操作などページ内の他の操作で
+    # Streamlitのスクリプトが再実行されるたびに書き込みが走ってしまうため。
+    if "news_last_viewed_recorded" not in st.session_state:
+        save_news_last_viewed(datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))
+        st.session_state["news_last_viewed_recorded"] = True
 
     by_date = {}
     for e in entries:
         d = e.get("date", "不明")
         by_date.setdefault(d, []).append(e)
     for d in sorted(by_date.keys(), reverse=True):
-        st.markdown(f"**📅 {d}**")
+        is_today = d == today_str
+        is_unread_date = last_viewed_date is None or d > last_viewed_date
+        date_badge = "　🆕 本日追加" if is_today else ""
+        st.markdown(f"**📅 {d}**{date_badge}")
         for e in by_date[d]:
             headline = e.get("headline", "")
             summary = e.get("summary", "")
@@ -2791,8 +2871,23 @@ def render_news_archive_page():
             tags_html = (
                 f'<br><span class="small-note">{theme_tags}</span>' if theme_tags else ""
             )
+            new_badge_html = (
+                ' <span style="background:#f97316;color:white;padding:1px 6px;'
+                'border-radius:4px;font-size:0.7em;font-weight:bold;">🆕 NEW</span>'
+                if is_today else ""
+            )
+            unread_badge_html = (
+                ' <span style="background:#3b82f6;color:white;padding:1px 6px;'
+                'border-radius:4px;font-size:0.7em;font-weight:bold;">未読</span>'
+                if (is_unread_date and not is_today) else ""
+            )
+            box_style = (
+                "background-color:rgba(59,130,246,0.12);border-left:3px solid #3b82f6;"
+                if is_unread_date else "opacity:0.65;"
+            )
             st.markdown(
-                f'<div class="fact-box"><b>{headline}</b>{src_html}<br>{summary}{tags_html}</div>',
+                f'<div class="fact-box" style="{box_style}"><b>{headline}</b>'
+                f'{new_badge_html}{unread_badge_html}{src_html}<br>{summary}{tags_html}</div>',
                 unsafe_allow_html=True,
             )
 
