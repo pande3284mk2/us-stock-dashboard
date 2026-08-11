@@ -1,0 +1,46 @@
+name: Portfolio Summary Email
+
+# ポートフォリオ（保有株）の定時サマリーメールを、30分おきに送るワークフロー。
+# GitHub Actions（GitHubが無料で提供している「決まった時刻に自動でプログラムを
+# 実行してくれる仕組み」）を使い、PCやアプリを閉じていても実行される。
+#
+# ［2026-08-11 新規作成］以前は .github/workflows/portfolio_alert.yml（5分間隔）が
+# 「アラート判定」と「毎時30分の定時サマリー」の両方を担っていましたが、
+# 5分間隔のような高頻度スケジュールは実際にはGitHub側で大幅に間引かれてしまい
+# （数時間に1回程度しか実行されない）、結果として定時サマリーがほとんど届かない
+# 状態になっていました。
+# このワークフローは定時サマリー専用として分離したもので、頻度は30分間隔と
+# 低めなので、アラート用ワークフローよりも安定して実行されることが期待できます
+# （ただし、GitHubの仕様上100%正確な30分間隔は保証されません）。
+#
+# 実行されるたびに、値動きの大きさに関係なく必ずサマリーメールを送ります
+# （「毎時30分ちょうどか」の判定は不要。実行された時点のスナップショットを送るだけ）。
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  # GitHubの「Actions」画面から手動で今すぐ実行したい時のためのボタンも用意しておく。
+  workflow_dispatch:
+
+jobs:
+  send-summary:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install yfinance
+
+      - name: Send portfolio summary email
+        env:
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+        run: python scripts/portfolio_email_alert.py summary
