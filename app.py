@@ -1678,7 +1678,10 @@ def render_theme_heatmap(df):
         )
         for r_idx, theme_name in enumerate(ranked):
             score = score_map[theme_name]
-            short = THEME_SHORT_NAMES.get(theme_name, theme_name[:3])
+            # スマホ幅など列数に対してプロット幅が狭い場合、6文字近い短縮名だと
+            # セル幅を超えて隣のセルに文字がはみ出し重なって読めなくなることがあったため、
+            # セル内表示は最大4文字に強制的に切り詰める（フルネームはホバーで確認できる）。
+            short = THEME_SHORT_NAMES.get(theme_name, theme_name[:3])[:4]
             grid_z[r_idx][c_idx] = score
             grid_text[r_idx][c_idx] = f"{short}<br>{score:+.1f}%"
             grid_full[r_idx][c_idx] = f"{theme_name}: {score:+.2f}%"
@@ -1732,13 +1735,20 @@ def render_theme_heatmap(df):
         customdata=grid_full,
         hovertemplate="%{customdata}<extra></extra>",
     )
+    # 列見出し（大分類名）は斜め45度程度の角度だと、文字数の多い分類名
+    # （例：「エネルギー・素材系」）で隣の列見出しと重なって判読できなくなることがあった。
+    # 縦書き（-90度）にすることで見出し1つあたりの横幅を文字サイズ程度まで圧縮でき、
+    # 列数が多いスマホ幅のレイアウトでも重なりを避けられる。
+    longest_cat_len = max((len(c) for c in categories), default=0)
+    top_margin = max(60, longest_cat_len * 9 + 30)
+
     fig.update_layout(
         template="plotly_dark",
-        height=42 * max_rows + 80,
-        margin=dict(l=10, r=10, t=40, b=10),
+        height=42 * max_rows + top_margin + 40,
+        margin=dict(l=10, r=10, t=top_margin, b=10),
         paper_bgcolor="rgba(0,0,0,0)",
         yaxis_visible=False,
-        xaxis=dict(side="top", tickfont=dict(size=11)),
+        xaxis=dict(side="top", tickfont=dict(size=10), tickangle=-90),
         # 色データはプラス・マイナスをそれぞれ独立に-1〜+1へ正規化したものであり、
         # 実際の騰落率（%）とは対応しないため、誤解を招かないようカラーバー（凡例）は
         # 非表示にする。正確な数値はセル内テキストとホバー時のツールチップで確認できる。
@@ -1768,12 +1778,23 @@ def _theme_bar_fig(sub_df):
             hovertemplate="<b>%{y}</b><br>平均騰落率: %{x:+.2f}%<br>構成銘柄: %{customdata}<extra></extra>",
         )
     )
+    # 「outside」指定した数値ラベルは、バーの符号によっては軸の外側（0からより離れた側）に
+    # はみ出して描画される。スマホ幅などプロット領域が狭い場合、この部分が画面端で
+    # クリップされて数値が読めなくなることがあったため、データの最小値・最大値に
+    # 余白（パディング）を持たせたx軸レンジを明示的に指定し、ラベル用のスペースを確保する。
+    values = sub_df["騰落率"]
+    x_min = min(0, values.min())
+    x_max = max(0, values.max())
+    spread = x_max - x_min
+    pad = spread * 0.22 if spread > 0 else 1.0
+
     fig.update_layout(
         template="plotly_dark",
         height=max(320, 34 * len(sub_df) + 60),
         xaxis_title="平均騰落率 (%)",
-        yaxis=dict(autorange="reversed"),
-        margin=dict(l=10, r=30, t=20, b=10),
+        xaxis=dict(range=[x_min - pad, x_max + pad]),
+        yaxis=dict(autorange="reversed", automargin=True),
+        margin=dict(l=10, r=10, t=20, b=10),
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
         showlegend=False,
@@ -2634,6 +2655,21 @@ def render_commentary(period_key):
         if bearish_curated == [] and bottom_n.empty:
             st.caption("本日、弱気材料は見当たりませんでした。")
 
+    future_themes = data.get("future_themes")
+    if future_themes:
+        st.markdown("**🔮 今後資金が向かう可能性のあるテーマ**")
+        for th in future_themes:
+            ft_title = th.get("title", "")
+            ft_reason = th.get("reason", "")
+            ft_conf = th.get("confidence", "中")
+            ft_badge_cls = _confidence_class(ft_conf)
+            st.markdown(
+                f'<div class="insight-box"><b>{ft_title}</b>'
+                f'<span class="confidence-badge {ft_badge_cls}">確度: {ft_conf}</span><br>{ft_reason}</div>',
+                unsafe_allow_html=True,
+            )
+        st.caption("※ 将来の値動きを保証するものではなく、あくまで考察時点での見立てです。")
+
     st.caption(
         "※ 強気・弱気テーマは、commentary.jsonの記述と本日のテーマ強弱ランキング（上位/下位）を"
         "組み合わせて機械的に整理したものです。"
@@ -2903,7 +2939,7 @@ def render_news_archive_page():
 def render_dashboard_page(period_key):
     """「📊 分析ダッシュボード」ページ：市場全体の考察・指数・テーマ/セクター強弱・
     大口投資家の動き・相関マトリクスをまとめて表示する。"""
-    st.title("📊 米国株 大口投資家動向・セクター強弱ダッシュボード")
+    st.header("📊 米国株 大口投資家動向・セクター強弱ダッシュボード")
     st.caption("開くたびに最新データをその場で取得して表示します。")
 
     st.markdown('<div class="section-title">🧭 主要指数・資産</div>', unsafe_allow_html=True)
