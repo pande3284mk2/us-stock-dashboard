@@ -1,28 +1,30 @@
 name: Portfolio Email Alert
 
 # ポートフォリオ（保有株）の時間外・プレマーケットの値動きを、5分おきに
-# チェックしてメールでお知らせするワークフロー。
+# チェックしてメールでお知らせするワークフロー（アラート判定専用）。
 # GitHub Actions（GitHubが無料で提供している「決まった時刻に自動でプログラムを
 # 実行してくれる仕組み」）を使い、PCやアプリを閉じていても実行される。
 #
-# 通知のルール（scripts/portfolio_email_alert.py 側で判定）:
-#   ・5分ごと（毎時0,5,10,15,20,25,30,35,40,45,50,55分）の実行のたび、
+# ［2026-08-11 追記］以前はこのワークフロー1つで「アラート判定」と「毎時30分の
+# 定時サマリー」の両方を担っていましたが、5分間隔の高頻度スケジュールは実際には
+# GitHub側で大幅に間引かれてしまい、結果として定時サマリーがほとんど届かない
+# 状態になっていました。そこで、定時サマリーは別ワークフロー
+# （.github/workflows/portfolio_summary.yml、30分間隔）に分離し、
+# このワークフローはアラート判定のみを担当します。
+#
+# 通知のルール（scripts/portfolio_email_alert.py alert 側で判定）:
+#   ・5分ごと（毎時2,7,12,17,22,27,32,37,42,47,52,57分）の実行のたび、
 #     「前回チェック（5分前）の価格」からの変化率が±3%以上なら、その場で
 #     アラートメールを送る（前日終値ではなく、直近の5分前比較）。
-#   ・毎時30分の実行のときだけ、値動きに関係なく、保有銘柄全体の
-#     定時サマリーメール（前日終値からの変化率）も必ず送る。
-#   → 毎時30分は「定時サマリー」＋「（該当あれば）アラート」の2通が届く場合がある。
-#      それ以外の5分刻みの実行は「（該当あれば）アラート」のみ。
+#   ・値動きが無ければメールは送らない（毎回必ず送るのは定時サマリー側の役目）。
 #
 # 「前回チェック時の価格」は data/last_check_prices.json に保存し、実行の
 # 最後にこのワークフローがリポジトリへコミットし直す（このためリポジトリへの
 # 書き込み権限 contents: write が必要）。
 #
-# ［2026-08-10 追記］毎時0分ちょうどはGitHub Actions全体で実行が混雑し、
-# スケジュール実行が遅延しやすいとGitHub公式ドキュメントに記載されているため、
+# 毎時0分ちょうどはGitHub Actions全体で実行が混雑し、スケジュール実行が
+# 遅延しやすいとGitHub公式ドキュメントに記載されているため、
 # 実行タイミングを毎時2,7,12,17,22,27,32,37,42,47,52,57分にずらしている。
-# また、スケジュール実行が一度も認識されない不具合の対策として、
-# このワークフローファイルを一度削除し、まっさらな状態で作り直している。
 
 on:
   schedule:
@@ -30,11 +32,6 @@ on:
     - cron: "2-59/5 * * * *"
   # GitHubの「Actions」画面から手動で今すぐ実行したい時のためのボタンも用意しておく。
   workflow_dispatch:
-    inputs:
-      run_as_summary:
-        description: "手動実行時に定時サマリーとして扱う場合は true"
-        required: false
-        default: "false"
 
 permissions:
   contents: write
@@ -63,28 +60,11 @@ jobs:
           pip install --upgrade pip
           pip install yfinance
 
-      - name: Determine whether this run is the 30-minute summary run
-        # 5分おきの単一cron（2-59/5 * * * *）だけでは「今が毎時30分の実行か」を
-        # 区別できないため、実行時刻（UTC・分）を直接調べて判定する。
-        # 手動実行（workflow_dispatch）の場合は、入力欄 run_as_summary の値を使う。
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "IS_SUMMARY_RUN=${{ github.event.inputs.run_as_summary }}" >> "$GITHUB_ENV"
-          else
-            CURRENT_MINUTE=$(date -u +%M)
-            if [ "$CURRENT_MINUTE" = "30" ]; then
-              echo "IS_SUMMARY_RUN=true" >> "$GITHUB_ENV"
-            else
-              echo "IS_SUMMARY_RUN=false" >> "$GITHUB_ENV"
-            fi
-          fi
-
-      - name: Run portfolio email alert script
+      - name: Run alert check
         env:
           GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
-          IS_SUMMARY_RUN: ${{ env.IS_SUMMARY_RUN }}
-        run: python scripts/portfolio_email_alert.py
+        run: python scripts/portfolio_email_alert.py alert
 
       - name: Commit updated last-check prices
         # data/last_check_prices.json が変化していればコミットし直す。
