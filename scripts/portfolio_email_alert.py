@@ -5,29 +5,33 @@
 
 【このスクリプトは何をするもの？】
   GitHub Actions（GitHubが無料で提供している「決まった時刻に自動でプログラムを
-  実行してくれる仕組み」）から5分おき（毎時0,5,10,15,20,25,30,35,40,45,50,55分）
-  に呼び出され、portfolio.json に書かれている保有株について、現在の株価（時間外
-  取引・プレマーケットの値も含む）を取得し、条件に応じて m.pande3284mk2@gmail.com
-  宛にメールを送ります。
+  実行してくれる仕組み」）から、2つの別々のワークフローによって呼び出されます。
+  portfolio.json に書かれている保有株について、現在の株価（時間外取引・
+  プレマーケットの値も含む）を取得し、m.pande3284mk2@gmail.com 宛にメールを送ります。
+
+【2026-08-11 追記：ワークフローを分離しました】
+  以前は1つのワークフロー（5分間隔）が「アラート判定」と「毎時30分の定時サマリー」の
+  両方を担っていましたが、GitHub Actions側の制約により、5分間隔のような高頻度
+  スケジュールは実際にはGitHub側で大幅に間引かれてしまい（数時間に1回程度しか
+  実行されない）、結果として定時サマリーがほとんど届かない状態になっていました。
+  そこで、実行頻度が異なる2つのワークフローに分離し、このスクリプトはコマンドライン
+  引数（第1引数）で「どちらの処理を行うか」を切り替えられるようにしています。
+    ・python scripts/portfolio_email_alert.py alert   … アラート判定のみ行う
+    ・python scripts/portfolio_email_alert.py summary … 定時サマリーのみ行う
+  引数を省略した場合は、後方互換のため "alert" として扱います。
 
 【2種類の判定基準を使い分けています（重要）】
-  ・アラート（5分ごと）……「前回チェック（5分前）の価格からどれだけ動いたか」を基準に
-    判定します。前回チェック時の価格は data/last_check_prices.json というファイルに
+  ・アラート（.github/workflows/portfolio_alert.yml、5分おき）……
+    「前回チェック（5分前）の価格からどれだけ動いたか」を基準に判定します。
+    前回チェック時の価格は data/last_check_prices.json というファイルに
     保存しておき、毎回の実行でこのファイルを読み込んで比較し、実行の最後に今回の価格で
     上書き保存（→GitHubへコミット）します。
     こうすることで、急な値動きが起きた「その瞬間」だけアラートが届き、いったん動いた後
     その水準にとどまっている間は再送されません（前日終値を基準にすると、一度3%を超えた
     まま値が動かなくても、5分おきに同じアラートが届き続けてしまうため）。
-  ・定時サマリー（毎時30分のみ）……従来通り「前日終値からの変化率」を基準にします。
-    これは30分に一度の定期報告なので、基準はそのままで問題ありません。
-
-【メールが届くタイミング】
-  - 5分ごとの実行のたび「必ず」チェックし、前回チェック時から ±3%以上動いた銘柄が
-    あれば、その場でアラートメールを送る。
-  - それとは別に、毎時30分の実行の時「だけ」、値動きの大きさに関係なく、保有銘柄
-    全体の状況をまとめた「定時サマリーメール」を必ず送る（前日終値からの変化率）。
-  → 毎時30分は「定時サマリー」＋「（該当あれば）アラート」の2通が届く場合がある。
-    それ以外の5分刻みの実行は「（該当あれば）アラート」の1通のみ。
+  ・定時サマリー（.github/workflows/portfolio_summary.yml、30分おき）……
+    従来通り「前日終値からの変化率」を基準にします。実行されるたびに、値動きの
+    大きさに関係なく必ず送信します（毎時30分ちょうどである必要はありません）。
 
 【個別銘柄の売買推奨は一切行いません。あくまで価格変動の事実をお知らせするだけです。】
 
@@ -36,11 +40,11 @@
   regularMarketPreviousClose（「前々日」の終値を指してしまうことがある）を
   そのまま前日終値として使うと、実際より大きく・的外れな変化率になることがある
   ため、このスクリプトでは以下のように補正しています。
-    ・プレマーケット中／アフターマーケット中は、Yahoo!ファイナンス自身が計算する
-      preMarketChangePercent／postMarketChangePercent（あれば）を最優先で使う。
-    ・それらが無い場合のみ自前で計算するが、その際の基準値は
-      regularMarketPreviousClose ではなく、直近の通常取引終値である
-      regularMarketPrice を使う（詳しくは get_reference_snapshot() のコメント参照）。
+  ・プレマーケット中／アフターマーケット中は、Yahoo!ファイナンス自身が計算する
+    preMarketChangePercent／postMarketChangePercent（あれば）を最優先で使う。
+  ・それらが無い場合のみ自前で計算するが、その際の基準値は
+    regularMarketPreviousClose ではなく、直近の通常取引終値である
+    regularMarketPrice を使う（詳しくは get_reference_snapshot() のコメント参照）。
 
 【使っている言葉の説明】
   ・yfinance …… Yahoo!ファイナンスの株価データを無料で取得できるPythonの道具（ライブラリ）。
@@ -85,7 +89,6 @@ TO_ADDRESS = "m.pande3284mk2@gmail.com"
 # メール本文に表示する時刻は日本時間に変換する。
 JST = timezone(timedelta(hours=9))
 
-
 # =====================================================
 # データ取得まわり
 # =====================================================
@@ -96,7 +99,6 @@ def load_portfolio():
         data = json.load(f)
     return data.get("holdings", []), data.get("cash_jpy", 0.0)
 
-
 def load_last_check_prices():
     """前回チェック時の価格（銘柄→価格の辞書）を読み込む。ファイルが無い場合は空の辞書。"""
     try:
@@ -105,13 +107,11 @@ def load_last_check_prices():
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
 
-
 def save_last_check_prices(prices):
     """今回チェックした価格を、次回チェック用にファイルへ保存する。"""
     os.makedirs(os.path.dirname(LAST_CHECK_PRICES_PATH), exist_ok=True)
     with open(LAST_CHECK_PRICES_PATH, "w", encoding="utf-8") as f:
         json.dump(prices, f, ensure_ascii=False, indent=2, sort_keys=True)
-
 
 def get_usdjpy_rate():
     """ドル円レートを取得する。取得できない場合は None を返す。
@@ -127,7 +127,6 @@ def get_usdjpy_rate():
         print(f"[警告] ドル円レートの取得に失敗しました: {e}", file=sys.stderr)
     return None
 
-
 # 時間外・プレマーケットの状態を、日本語の分かりやすい表示に変換するための対応表。
 # yfinanceが返す marketState の値: PRE / PREPRE / REGULAR / POST / POSTPOST / CLOSED
 MARKET_STATE_LABELS = {
@@ -139,25 +138,24 @@ MARKET_STATE_LABELS = {
     "CLOSED": "取引時間外",
 }
 
-
 def get_reference_snapshot(ticker):
     """1銘柄について、現在値・前日終値からの変化率（定時サマリー用）を取得する。
 
     【前日終値の扱いに関する重要な注意】
     Yahoo!ファイナンスの regularMarketPreviousClose は、「regularMarketPrice が
     示す取引セッションの、さらに1つ前のセッションの終値」を意味する。
-      ・通常取引中（REGULAR）は regularMarketPrice=本日の現在値、
-        regularMarketPreviousClose=前営業日の終値 となり、両者を比べれば
-        正しく「本日の前日比」になる。
-      ・しかしプレマーケット中（PRE、本日の取引開始前）は、regularMarketPrice が
-        まだ「直近の終値（＝前営業日の終値）」を指したままのため、
-        regularMarketPreviousClose は前営業日のさらに1つ前（前々営業日）の
-        終値を指してしまう。この状態で regularMarketPreviousClose を「前日終値」
-        として使うと、実際には2営業日分の値動きを1日分であるかのように計算して
-        しまい、変化率が大きくずれる（本アプリで実際に発生した不具合）。
-      ・アフターマーケット中（POST）も同様に、regularMarketPrice が「本日の
-        終値」に更新された直後は問題ないが、念のため前営業日の終値
-        （＝プレマーケット同様 regularMarketPrice）を基準にする方が安全。
+    ・通常取引中（REGULAR）は regularMarketPrice=本日の現在値、
+      regularMarketPreviousClose=前営業日の終値 となり、両者を比べれば
+      正しく「本日の前日比」になる。
+    ・しかしプレマーケット中（PRE、本日の取引開始前）は、regularMarketPrice が
+      まだ「直近の終値（＝前営業日の終値）」を指したままのため、
+      regularMarketPreviousClose は前営業日のさらに1つ前（前々営業日）の
+      終値を指してしまう。この状態で regularMarketPreviousClose を「前日終値」
+      として使うと、実際には2営業日分の値動きを1日分であるかのように計算して
+      しまい、変化率が大きくずれる（本アプリで実際に発生した不具合）。
+    ・アフターマーケット中（POST）も同様に、regularMarketPrice が「本日の
+      終値」に更新された直後は問題ないが、念のため前営業日の終値
+      （＝プレマーケット同様 regularMarketPrice）を基準にする方が安全。
     このため、プレマーケット／アフターマーケット中は、まず Yahoo!ファイナンス
     自身が計算済みの preMarketChangePercent／postMarketChangePercent を優先して
     使い、それが無い場合のみ regularMarketPrice を基準に自前で計算する
@@ -229,7 +227,6 @@ def get_reference_snapshot(ticker):
         print(f"[警告] {ticker} の株価取得に失敗しました: {e}", file=sys.stderr)
         return None
 
-
 def build_summary_report(holdings, usdjpy_rate):
     """定時サマリー用：保有銘柄それぞれの「前日終値からの」当日変化を計算する。"""
     report = []
@@ -253,13 +250,12 @@ def build_summary_report(holdings, usdjpy_rate):
         report.append(snap)
     return report
 
-
 def build_alert_check(holdings, usdjpy_rate):
     """アラート用：保有銘柄それぞれについて「前回チェック（5分前）からの」変化を計算する。
 
     戻り値: (triggered, current_prices)
-      triggered ……  ±3%以上動いた銘柄の情報リスト（前回価格が無い＝初回チェックの
-                     銘柄は、比較対象が無いためアラート対象にはしない）
+      triggered …… ±3%以上動いた銘柄の情報リスト（前回価格が無い＝初回チェックの
+                    銘柄は、比較対象が無いためアラート対象にはしない）
       current_prices … 今回取得できた「銘柄→現在値」の辞書。次回チェック用に
                         ファイルへ保存する。
     """
@@ -305,7 +301,6 @@ def build_alert_check(holdings, usdjpy_rate):
 
     return triggered, current_prices
 
-
 # =====================================================
 # メール本文づくり
 # =====================================================
@@ -313,9 +308,11 @@ def build_alert_check(holdings, usdjpy_rate):
 def now_jst_str():
     return datetime.now(JST).strftime("%Y-%m-%d %H:%M JST")
 
-
 def format_summary_email(report, usdjpy_rate):
-    """毎時30分に必ず送る「定時サマリー」メールの件名・本文を作る（前日終値基準）。"""
+    """定時サマリーメールの件名・本文を作る（前日終値基準）。
+
+    portfolio_summary.yml から30分おきに呼ばれ、実行のたびに必ず送信される。
+    """
     total_jpy_change = sum(r["jpy_change"] for r in report if not r["error"] and r["jpy_change"] is not None)
 
     lines = []
@@ -342,7 +339,7 @@ def format_summary_email(report, usdjpy_rate):
     lines.append("―― 合計 ――")
     lines.append(f"保有銘柄の当日の円換算損益 合計: {total_jpy_change:+,.0f} 円")
     lines.append("")
-    lines.append("※ このメールは毎時30分に届く定時レポートで、前日終値からの変化を基準にしています。")
+    lines.append("※ このメールは30分おきに届く定時レポートで、前日終値からの変化を基準にしています。")
     lines.append("　 5分ごとのアラートは「前回チェック時からの変化」が基準のため、数値の意味が異なります。")
     lines.append("")
     lines.append("⚠️ このメールは価格変動の事実をお知らせするものであり、投資助言ではありません。")
@@ -350,7 +347,6 @@ def format_summary_email(report, usdjpy_rate):
 
     subject = f"【定時サマリー】ポートフォリオ時間外レポート {datetime.now(JST).strftime('%m/%d %H:%M')}"
     return subject, "\n".join(lines)
-
 
 def format_alert_email(triggered):
     """前回チェック（5分前）比で±3%以上動いた銘柄がある時だけ送る「アラート」メール。"""
@@ -379,7 +375,6 @@ def format_alert_email(triggered):
     subject = f"【アラート】{' / '.join(ticker_labels)}"
     return subject, "\n".join(lines)
 
-
 # =====================================================
 # メール送信
 # =====================================================
@@ -389,7 +384,7 @@ def send_email(subject, body):
 
     GMAIL_ADDRESS: 送信元のGmailアドレス（GitHub Secretsから環境変数として渡される）
     GMAIL_APP_PASSWORD: Googleアカウントで発行した「アプリパスワード」
-                        （通常のログインパスワードとは別物。GitHub Secretsから渡される）
+    （通常のログインパスワードとは別物。GitHub Secretsから渡される）
     """
     gmail_address = os.environ.get("GMAIL_ADDRESS")
     gmail_app_password = os.environ.get("GMAIL_APP_PASSWORD")
@@ -414,16 +409,16 @@ def send_email(subject, body):
 
     print(f"[送信完了] {subject}")
 
-
 # =====================================================
 # メイン処理
 # =====================================================
 
-def main():
-    # IS_SUMMARY_RUN は .github/workflows/portfolio_alert.yml の中で、
-    # 実行時刻（UTC・分）が30分かどうかに応じて "true" / "false" が渡される環境変数。
-    is_summary_run = os.environ.get("IS_SUMMARY_RUN", "false").strip().lower() == "true"
+def run_alert_mode():
+    """アラート判定のみ行う（.github/workflows/portfolio_alert.yml、5分おき想定）。
 
+    前回チェック比で±3%以上動いた銘柄があればアラートメールを送り、
+    今回の価格を次回チェック用に data/last_check_prices.json へ保存する。
+    """
     holdings, _cash_jpy = load_portfolio()
     if not holdings:
         print("portfolio.json に保有銘柄がないため、処理を終了します。")
@@ -431,7 +426,6 @@ def main():
 
     usdjpy_rate = get_usdjpy_rate()
 
-    # ---- ①アラートチェック：5分ごとの実行のたび必ず行う（前回チェック比） ----
     triggered, current_prices = build_alert_check(holdings, usdjpy_rate)
     if triggered:
         subject, body = format_alert_email(triggered)
@@ -439,20 +433,37 @@ def main():
     else:
         print(f"前回チェック比でしきい値(±{ALERT_THRESHOLD_PCT:.0f}%)を超えた銘柄はありませんでした。アラートメールは送信しません。")
 
-    # 次回チェック用に、今回取得できた価格を保存する
-    # （.github/workflows/portfolio_alert.yml 側でこのファイルをコミットする）。
     if current_prices:
         save_last_check_prices(current_prices)
         print(f"[記録] 次回チェック用に価格を保存しました: {current_prices}")
 
-    # ---- ②定時サマリー：毎時30分の実行のときだけ、値動きに関係なく必ず送る（前日終値比） ----
-    if is_summary_run:
-        report = build_summary_report(holdings, usdjpy_rate)
-        subject, body = format_summary_email(report, usdjpy_rate)
-        send_email(subject, body)
-    else:
-        print("今回は毎時30分の実行ではないため、定時サマリーメールは送信しません（アラートのみ判定）。")
+def run_summary_mode():
+    """定時サマリーのみ行う（.github/workflows/portfolio_summary.yml、30分おき想定）。
 
+    実行されるたびに、値動きの大きさに関係なく必ず定時サマリーメールを送る。
+    """
+    holdings, _cash_jpy = load_portfolio()
+    if not holdings:
+        print("portfolio.json に保有銘柄がないため、処理を終了します。")
+        return
+
+    usdjpy_rate = get_usdjpy_rate()
+
+    report = build_summary_report(holdings, usdjpy_rate)
+    subject, body = format_summary_email(report, usdjpy_rate)
+    send_email(subject, body)
+
+def main():
+    # 第1引数で "alert" か "summary" かを切り替える。省略時は後方互換のため "alert"。
+    mode = sys.argv[1].strip().lower() if len(sys.argv) > 1 else "alert"
+
+    if mode == "summary":
+        run_summary_mode()
+    elif mode == "alert":
+        run_alert_mode()
+    else:
+        print(f"[エラー] 不明なモードです: {mode!r}（alert または summary を指定してください）", file=sys.stderr)
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
