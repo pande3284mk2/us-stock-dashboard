@@ -779,9 +779,17 @@ def get_news_archive():
 def get_news_last_viewed():
     """前回このアプリで「📰 ニュースアーカイブ」ページを訪れた日時（UTC, ISO8601文字列）を
     GitHub上のnews_last_viewed.jsonから取得する。まだ一度も記録されていない場合はNoneを返す。
+
+    raw.githubusercontent.com経由だとCDNキャッシュにより、直前の書き込みが数分間反映されない
+    ことがある（このファイルは訪問のたびに書き換わるため特に影響を受けやすい）。そのため、
+    キャッシュを経由しないGitHub Contents API経由で取得する（portfolio.json等と同じ方式）。
     """
     try:
-        resp = requests.get(NEWS_LAST_VIEWED_RAW_URL, timeout=15)
+        resp = requests.get(
+            GITHUB_NEWS_VIEWED_API_URL,
+            headers={**_github_headers(), "Accept": "application/vnd.github.v3.raw"},
+            timeout=15,
+        )
         if resp.status_code == 404:
             return None
         resp.raise_for_status()
