@@ -1774,6 +1774,12 @@ def _theme_bar_fig(sub_df):
             marker_color=["#00cc96" if v >= 0 else "#ef553b" for v in sub_df["騰落率"]],
             text=[f"{v:+.2f}%" for v in sub_df["騰落率"]],
             textposition="outside",
+            # 「outside」の数値ラベルは、プロット領域の外（軸の外側）にはみ出して
+            # 描画されることがある。デフォルトではその部分が軸の境界でクリップされて
+            # 見えなくなってしまうため、cliponaxis=Falseで軸の外にはみ出して描画される
+            # ことを明示的に許可し、スマホ幅などプロット領域が特に狭い場合でも
+            # 数値が見切れないようにする。
+            cliponaxis=False,
             customdata=sub_df["構成銘柄"],
             hovertemplate="<b>%{y}</b><br>平均騰落率: %{x:+.2f}%<br>構成銘柄: %{customdata}<extra></extra>",
         )
@@ -1786,7 +1792,7 @@ def _theme_bar_fig(sub_df):
     x_min = min(0, values.min())
     x_max = max(0, values.max())
     spread = x_max - x_min
-    pad = spread * 0.22 if spread > 0 else 1.0
+    pad = spread * 0.32 if spread > 0 else 1.0
 
     fig.update_layout(
         template="plotly_dark",
