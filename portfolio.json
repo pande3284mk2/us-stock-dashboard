@@ -7,8 +7,8 @@
     },
     {
       "ticker": "AAOG",
-      "shares": 460.0,
-      "cost_basis": 2.87
+      "shares": 260.0,
+      "cost_basis": 3.468
     },
     {
       "ticker": "IONL",
@@ -17,5 +17,5 @@
     }
   ],
   "cash_jpy": 600000.0,
-  "updated_at": "2026-08-10T11:35:17Z"
+  "updated_at": "2026-08-11T01:37:05Z"
 }
