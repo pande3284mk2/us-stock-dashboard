@@ -22,6 +22,11 @@ name: Portfolio Loop (Self-Restarting)
 # 一本化されている。.github/workflows/portfolio_alert.yml と
 # .github/workflows/portfolio_summary.yml は、schedule トリガーを外して
 # 手動実行（workflow_dispatch）のみの動作確認用として残してある。
+#
+# ［2026-08-13 修正］ PYTHONUNBUFFERED を設定し、-u オプションを付けて
+# 実行するようにした。これが無いと、Pythonの標準出力がバッファリングされて
+# しまい、ログ画面にリアルタイムで出力が反映されない（数時間経つかジョブが
+# 終わるまでログが空白のまま見える）問題があったため。
 
 on:
   workflow_dispatch:
@@ -65,4 +70,5 @@ jobs:
           GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: python scripts/portfolio_loop.py
+          PYTHONUNBUFFERED: "1"
+        run: python -u scripts/portfolio_loop.py
