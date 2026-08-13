@@ -5,7 +5,7 @@
 
 【このスクリプトは何をするもの？】
   GitHub Actions（GitHubが無料で提供している「決まった時刻に自動でプログラムを
-  実行してくれる仕組み」）から、2つの別々のワークフローによって呼び出されます。
+  実行してくれる仕組み」）から、複数のワークフローによって呼び出されます。
   portfolio.json に書かれている保有株について、現在の株価（時間外取引・
   プレマーケットの値も含む）を取得し、m.pande3284mk2@gmail.com 宛にメールを送ります。
 
@@ -20,18 +20,30 @@
     ・python scripts/portfolio_email_alert.py summary … 定時サマリーのみ行う
   引数を省略した場合は、後方互換のため "alert" として扱います。
 
+【2026-08-13 追記：自己ループ式ワークフローを追加】
+  上記の「2つのワークフローに分離」した後も、実際の実行間隔は改善せず、
+  5分間隔・30分間隔のどちらで設定しても実際には数時間に1回程度しか実行されない
+  ことが分かりました（GitHub側が、個々のワークフローの設定頻度とは関係なく、
+  スケジュール実行の総数自体を絞っているとみられる）。
+  そこで、scripts/portfolio_loop.py という別スクリプトを追加し、1回のジョブの中で
+  Python自身がtime.sleep()を使って5分おきにこのモジュールの関数を直接呼び出す
+  「自己ループ式」の仕組みに切り替えました。build_alert_check() に
+  last_prices 引数を追加しているのはこのためです（ループ側は前回価格を
+  ファイルではなくメモリ上に保持し、5.5時間ごとにまとめてファイルへ保存します）。
+  詳しくは scripts/portfolio_loop.py と .github/workflows/portfolio_loop.yml を
+  参照してください。
+
 【2種類の判定基準を使い分けています（重要）】
-  ・アラート（.github/workflows/portfolio_alert.yml、5分おき）……
-    「前回チェック（5分前）の価格からどれだけ動いたか」を基準に判定します。
-    前回チェック時の価格は data/last_check_prices.json というファイルに
-    保存しておき、毎回の実行でこのファイルを読み込んで比較し、実行の最後に今回の価格で
-    上書き保存（→GitHubへコミット）します。
+  ・アラート……「前回チェックの価格からどれだけ動いたか」を基準に判定します。
+    通常実行（alertモード）では前回チェック時の価格を data/last_check_prices.json
+    というファイルから読み込んで比較し、実行の最後に今回の価格で上書き保存
+    （→GitHubへコミット）します。ループ実行では、このファイルの読み書きを
+    毎回行う代わりに、呼び出し側がメモリ上の辞書を直接渡します。
     こうすることで、急な値動きが起きた「その瞬間」だけアラートが届き、いったん動いた後
     その水準にとどまっている間は再送されません（前日終値を基準にすると、一度3%を超えた
-    まま値が動かなくても、5分おきに同じアラートが届き続けてしまうため）。
-  ・定時サマリー（.github/workflows/portfolio_summary.yml、30分おき）……
-    従来通り「前日終値からの変化率」を基準にします。実行されるたびに、値動きの
-    大きさに関係なく必ず送信します（毎時30分ちょうどである必要はありません）。
+    まま値が動かなくても、同じアラートが届き続けてしまうため）。
+  ・定時サマリー……従来通り「前日終値からの変化率」を基準にします。
+    実行されるたびに、値動きの大きさに関係なく必ず送信します。
 
 【個別銘柄の売買推奨は一切行いません。あくまで価格変動の事実をお知らせするだけです。】
 
@@ -75,8 +87,7 @@ import yfinance as yf
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PORTFOLIO_PATH = os.path.join(REPO_ROOT, "portfolio.json")
 
-# 「前回チェック時の価格」を保存しておくファイル。5分ごとの実行のたびに
-# 読み込み→比較→上書き保存し、GitHub Actions側でコミットする。
+# 「前回チェック時の価格」を保存しておくファイル。
 LAST_CHECK_PRICES_PATH = os.path.join(REPO_ROOT, "data", "last_check_prices.json")
 
 # アラートを送るしきい値（％）。
@@ -250,16 +261,21 @@ def build_summary_report(holdings, usdjpy_rate):
         report.append(snap)
     return report
 
-def build_alert_check(holdings, usdjpy_rate):
-    """アラート用：保有銘柄それぞれについて「前回チェック（5分前）からの」変化を計算する。
+def build_alert_check(holdings, usdjpy_rate, last_prices=None):
+    """アラート用：保有銘柄それぞれについて「前回チェックからの」変化を計算する。
+
+    last_prices を省略した場合は data/last_check_prices.json から読み込む
+    （単発実行のalertモード用）。ループ実行（portfolio_loop.py）からは、
+    メモリ上に保持している辞書を直接渡すことで、毎回のファイル読み込みを省略できる。
 
     戻り値: (triggered, current_prices)
       triggered …… ±3%以上動いた銘柄の情報リスト（前回価格が無い＝初回チェックの
                     銘柄は、比較対象が無いためアラート対象にはしない）
-      current_prices … 今回取得できた「銘柄→現在値」の辞書。次回チェック用に
-                        ファイルへ保存する。
+      current_prices … 今回取得できた「銘柄→現在値」の辞書。呼び出し側で
+                        次回チェック用に保存する。
     """
-    last_prices = load_last_check_prices()
+    if last_prices is None:
+        last_prices = load_last_check_prices()
     current_prices = {}
     triggered = []
 
@@ -309,10 +325,7 @@ def now_jst_str():
     return datetime.now(JST).strftime("%Y-%m-%d %H:%M JST")
 
 def format_summary_email(report, usdjpy_rate):
-    """定時サマリーメールの件名・本文を作る（前日終値基準）。
-
-    portfolio_summary.yml から30分おきに呼ばれ、実行のたびに必ず送信される。
-    """
+    """定時サマリーメールの件名・本文を作る（前日終値基準）。"""
     total_jpy_change = sum(r["jpy_change"] for r in report if not r["error"] and r["jpy_change"] is not None)
 
     lines = []
@@ -339,8 +352,8 @@ def format_summary_email(report, usdjpy_rate):
     lines.append("―― 合計 ――")
     lines.append(f"保有銘柄の当日の円換算損益 合計: {total_jpy_change:+,.0f} 円")
     lines.append("")
-    lines.append("※ このメールは30分おきに届く定時レポートで、前日終値からの変化を基準にしています。")
-    lines.append("　 5分ごとのアラートは「前回チェック時からの変化」が基準のため、数値の意味が異なります。")
+    lines.append("※ このメールは定期的に届くレポートで、前日終値からの変化を基準にしています。")
+    lines.append("　 アラートは「前回チェック時からの変化」が基準のため、数値の意味が異なります。")
     lines.append("")
     lines.append("⚠️ このメールは価格変動の事実をお知らせするものであり、投資助言ではありません。")
     lines.append("　 個別銘柄の売買判断はご自身の責任で行ってください。")
@@ -349,11 +362,11 @@ def format_summary_email(report, usdjpy_rate):
     return subject, "\n".join(lines)
 
 def format_alert_email(triggered):
-    """前回チェック（5分前）比で±3%以上動いた銘柄がある時だけ送る「アラート」メール。"""
+    """前回チェック比で±3%以上動いた銘柄がある時だけ送る「アラート」メール。"""
     lines = []
-    lines.append(f"🚨 直近5分の間に ±{ALERT_THRESHOLD_PCT:.0f}%以上の値動きを検知しました")
+    lines.append(f"🚨 ±{ALERT_THRESHOLD_PCT:.0f}%以上の値動きを検知しました")
     lines.append(f"日時: {now_jst_str()}")
-    lines.append("（前回チェック時＝約5分前の価格との比較です）")
+    lines.append("（前回チェック時の価格との比較です）")
     lines.append("")
 
     ticker_labels = []
@@ -364,7 +377,7 @@ def format_alert_email(triggered):
             f"・{r['ticker']}（{r['market_state_label']}）: "
             f"{r['last_price']:.2f}ドル → {r['current_price']:.2f}ドル"
             f"（前回チェック比 {arrow}{r['pct_change']:+.2f}%）"
-            f" ｜ 円換算損益（この5分間の分）: {jpy_text}"
+            f" ｜ 円換算損益（この間の分）: {jpy_text}"
         )
         ticker_labels.append(f"{r['ticker']}{arrow}{r['pct_change']:+.1f}%")
 
@@ -410,15 +423,11 @@ def send_email(subject, body):
     print(f"[送信完了] {subject}")
 
 # =====================================================
-# メイン処理
+# メイン処理（単発実行モード：alert / summary）
 # =====================================================
 
 def run_alert_mode():
-    """アラート判定のみ行う（.github/workflows/portfolio_alert.yml、5分おき想定）。
-
-    前回チェック比で±3%以上動いた銘柄があればアラートメールを送り、
-    今回の価格を次回チェック用に data/last_check_prices.json へ保存する。
-    """
+    """アラート判定のみ行う（単発実行、data/last_check_prices.json をファイル経由で利用）。"""
     holdings, _cash_jpy = load_portfolio()
     if not holdings:
         print("portfolio.json に保有銘柄がないため、処理を終了します。")
@@ -438,10 +447,7 @@ def run_alert_mode():
         print(f"[記録] 次回チェック用に価格を保存しました: {current_prices}")
 
 def run_summary_mode():
-    """定時サマリーのみ行う（.github/workflows/portfolio_summary.yml、30分おき想定）。
-
-    実行されるたびに、値動きの大きさに関係なく必ず定時サマリーメールを送る。
-    """
+    """定時サマリーのみ行う（単発実行）。実行されるたびに必ず定時サマリーメールを送る。"""
     holdings, _cash_jpy = load_portfolio()
     if not holdings:
         print("portfolio.json に保有銘柄がないため、処理を終了します。")
