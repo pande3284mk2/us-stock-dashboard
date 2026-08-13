@@ -1,0 +1,68 @@
+name: Portfolio Loop (Self-Restarting)
+
+# ポートフォリオの「自己ループ式」通知ワークフロー。
+#
+# ［背景］ 5分おき・30分おきのcronスケジュールをそれぞれ設定しても、GitHub側の
+# 都合で実際には数時間に1回程度しか実行されないことが分かった（過去の検証）。
+# ワークフローを2つに分離しても実態は変わらなかった。
+#
+# そこでこのワークフローは、1回のジョブ実行の中でPythonスクリプト
+# （scripts/portfolio_loop.py）自身がtime.sleep()を使い、5分おきの
+# アラート判定と30分おきの定時サマリーを繰り返す「ループ」処理を行う。
+# GitHub Actionsの1ジョブの実行時間上限（6時間）に近づく前（5時間30分）に、
+# スクリプトがGitHub REST APIを使って自分自身（このワークフロー）を
+# 再度 workflow_dispatch で起動してから終了する。これにより、5時間30分ごとに
+# バトンタッチしながら、実質的にエンドレスで動き続ける。
+#
+# ［注意］ これはGitHub Actions本来の使い方（CI/CDジョブ）から外れた使い方で、
+# 利用規約上グレーゾーンの可能性がある。強制停止や警告が来た場合はこの方式を
+# 諦め、別の方式に切り替えること。
+#
+# ［重複送信の防止］ 定時サマリー・アラートの送信ロジックはこのワークフローに
+# 一本化されている。.github/workflows/portfolio_alert.yml と
+# .github/workflows/portfolio_summary.yml は、schedule トリガーを外して
+# 手動実行（workflow_dispatch）のみの動作確認用として残してある。
+
+on:
+  workflow_dispatch:
+  schedule:
+    # ウォッチドッグ：万一ループが何らかの理由で停止していた場合に備え、
+    # 毎時0分に様子を見て再起動を試みる。concurrencyの設定により、
+    # ループが実際に動いている間はこのウォッチドッグは待機するだけで、
+    # 重複して起動することはない。
+    - cron: "0 * * * *"
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: portfolio-loop
+  cancel-in-progress: false
+
+jobs:
+  loop:
+    runs-on: ubuntu-latest
+    # スクリプト側は5時間30分（330分）で自発的に終了する設計。
+    # 万一終了しない場合に備え、5時間50分でGitHub側から強制終了する保険。
+    timeout-minutes: 350
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install yfinance
+
+      - name: Run self-looping check
+        env:
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python scripts/portfolio_loop.py
