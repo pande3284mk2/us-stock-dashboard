@@ -1,44 +1,25 @@
 name: Portfolio Email Alert
 
-# ポートフォリオ（保有株）の時間外・プレマーケットの値動きを、5分おきに
-# チェックしてメールでお知らせするワークフロー（アラート判定専用）。
-# GitHub Actions（GitHubが無料で提供している「決まった時刻に自動でプログラムを
-# 実行してくれる仕組み」）を使い、PCやアプリを閉じていても実行される。
+# ポートフォリオ（保有株）のアラート判定ワークフロー（手動テスト用）。
 #
-# ［2026-08-11 追記］以前はこのワークフロー1つで「アラート判定」と「毎時30分の
-# 定時サマリー」の両方を担っていましたが、5分間隔の高頻度スケジュールは実際には
-# GitHub側で大幅に間引かれてしまい、結果として定時サマリーがほとんど届かない
-# 状態になっていました。そこで、定時サマリーは別ワークフロー
-# （.github/workflows/portfolio_summary.yml、30分間隔）に分離し、
-# このワークフローはアラート判定のみを担当します。
+# ［2026-08-13 変更］ このワークフローの自動実行（schedule）は無効化しました。
+# 現在は .github/workflows/portfolio_loop.yml（自己ループ式ワークフロー）が
+# アラート判定・定時サマリーの両方を一本化して担当しています。
+# このファイルは、手動実行（workflow_dispatch）による動作確認・デバッグ用として
+# 残してあります。もし自己ループ式ワークフローが利用規約上の問題などで使えなく
+# なった場合は、下のscheduleコメントを元に戻すことで、このワークフロー単体での
+# 運用（実行間隔は数時間に1回程度）に戻せます。
 #
-# 通知のルール（scripts/portfolio_email_alert.py alert 側で判定）:
-#   ・5分ごと（毎時2,7,12,17,22,27,32,37,42,47,52,57分）の実行のたび、
-#     「前回チェック（5分前）の価格」からの変化率が±3%以上なら、その場で
-#     アラートメールを送る（前日終値ではなく、直近の5分前比較）。
-#   ・値動きが無ければメールは送らない（毎回必ず送るのは定時サマリー側の役目）。
-#
-# 「前回チェック時の価格」は data/last_check_prices.json に保存し、実行の
-# 最後にこのワークフローがリポジトリへコミットし直す（このためリポジトリへの
-# 書き込み権限 contents: write が必要）。
-#
-# 毎時0分ちょうどはGitHub Actions全体で実行が混雑し、スケジュール実行が
-# 遅延しやすいとGitHub公式ドキュメントに記載されているため、
-# 実行タイミングを毎時2,7,12,17,22,27,32,37,42,47,52,57分にずらしている。
+# 復活させる場合は on: の下に以下を追加してください:
+#   schedule:
+#     - cron: "2-59/5 * * * *"
 
 on:
-  schedule:
-    # 5分おき・毎時0分ジャストを避けて2分オフセット（UTC基準）
-    - cron: "2-59/5 * * * *"
-  # GitHubの「Actions」画面から手動で今すぐ実行したい時のためのボタンも用意しておく。
   workflow_dispatch:
 
 permissions:
   contents: write
 
-# 5分間隔の実行が万一重なった場合に、data/last_check_prices.json への
-# 書き込みが衝突しないよう、同時には1つの実行だけが動くようにする
-# （前の実行が終わるまで次の実行は待たされる。取りこぼしにはならない）。
 concurrency:
   group: portfolio-alert
   cancel-in-progress: false
@@ -67,8 +48,6 @@ jobs:
         run: python scripts/portfolio_email_alert.py alert
 
       - name: Commit updated last-check prices
-        # data/last_check_prices.json が変化していればコミットし直す。
-        # このファイルは次回5分後の実行が「前回価格」として読み込む。
         run: |
           if [ -n "$(git status --porcelain data/last_check_prices.json)" ]; then
             git config user.name "github-actions[bot]"
