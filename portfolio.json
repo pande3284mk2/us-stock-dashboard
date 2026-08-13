@@ -14,8 +14,13 @@
       "ticker": "IONL",
       "shares": 70.0,
       "cost_basis": 14.22
+    },
+    {
+      "ticker": "KOPN",
+      "shares": 200.0,
+      "cost_basis": 5.0247
     }
   ],
   "cash_jpy": 600000.0,
-  "updated_at": "2026-08-11T01:37:05Z"
+  "updated_at": "2026-08-13T02:05:14Z"
 }
