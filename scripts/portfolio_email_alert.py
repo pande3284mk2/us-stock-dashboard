@@ -4,69 +4,69 @@
 =====================================================
 
 【このスクリプトは何をするもの？】
-  GitHub Actions（GitHubが無料で提供している「決まった時刻に自動でプログラムを
-  実行してくれる仕組み」）から、複数のワークフローによって呼び出されます。
-  portfolio.json に書かれている保有株について、現在の株価（時間外取引・
-  プレマーケットの値も含む）を取得し、m.pande3284mk2@gmail.com 宛にメールを送ります。
+GitHub Actions（GitHubが無料で提供している「決まった時刻に自動でプログラムを
+実行してくれる仕組み」）から、複数のワークフローによって呼び出されます。
+portfolio.json に書かれている保有株について、現在の株価（時間外取引・
+プレマーケットの値も含む）を取得し、m.pande3284mk2@gmail.com 宛にメールを送ります。
 
 【2026-08-11 追記：ワークフローを分離しました】
-  以前は1つのワークフロー（5分間隔）が「アラート判定」と「毎時30分の定時サマリー」の
-  両方を担っていましたが、GitHub Actions側の制約により、5分間隔のような高頻度
-  スケジュールは実際にはGitHub側で大幅に間引かれてしまい（数時間に1回程度しか
-  実行されない）、結果として定時サマリーがほとんど届かない状態になっていました。
-  そこで、実行頻度が異なる2つのワークフローに分離し、このスクリプトはコマンドライン
-  引数（第1引数）で「どちらの処理を行うか」を切り替えられるようにしています。
-    ・python scripts/portfolio_email_alert.py alert   … アラート判定のみ行う
-    ・python scripts/portfolio_email_alert.py summary … 定時サマリーのみ行う
-  引数を省略した場合は、後方互換のため "alert" として扱います。
+以前は1つのワークフロー（5分間隔）が「アラート判定」と「毎時30分の定時サマリー」の
+両方を担っていましたが、GitHub Actions側の制約により、5分間隔のような高頻度
+スケジュールは実際にはGitHub側で大幅に間引かれてしまい（数時間に1回程度しか
+実行されない）、結果として定時サマリーがほとんど届かない状態になっていました。
+そこで、実行頻度が異なる2つのワークフローに分離し、このスクリプトはコマンドライン
+引数（第1引数）で「どちらの処理を行うか」を切り替えられるようにしています。
+・python scripts/portfolio_email_alert.py alert … アラート判定のみ行う
+・python scripts/portfolio_email_alert.py summary … 定時サマリーのみ行う
+引数を省略した場合は、後方互換のため "alert" として扱います。
 
 【2026-08-13 追記：自己ループ式ワークフローを追加】
-  上記の「2つのワークフローに分離」した後も、実際の実行間隔は改善せず、
-  5分間隔・30分間隔のどちらで設定しても実際には数時間に1回程度しか実行されない
-  ことが分かりました（GitHub側が、個々のワークフローの設定頻度とは関係なく、
-  スケジュール実行の総数自体を絞っているとみられる）。
-  そこで、scripts/portfolio_loop.py という別スクリプトを追加し、1回のジョブの中で
-  Python自身がtime.sleep()を使って5分おきにこのモジュールの関数を直接呼び出す
-  「自己ループ式」の仕組みに切り替えました。build_alert_check() に
-  last_prices 引数を追加しているのはこのためです（ループ側は前回価格を
-  ファイルではなくメモリ上に保持し、5.5時間ごとにまとめてファイルへ保存します）。
-  詳しくは scripts/portfolio_loop.py と .github/workflows/portfolio_loop.yml を
-  参照してください。
+上記の「2つのワークフローに分離」した後も、実際の実行間隔は改善せず、
+5分間隔・30分間隔のどちらで設定しても実際には数時間に1回程度しか実行されない
+ことが分かりました（GitHub側が、個々のワークフローの設定頻度とは関係なく、
+スケジュール実行の総数自体を絞っているとみられる）。
+そこで、scripts/portfolio_loop.py という別スクリプトを追加し、1回のジョブの中で
+Python自身がtime.sleep()を使って5分おきにこのモジュールの関数を直接呼び出す
+「自己ループ式」の仕組みに切り替えました。build_alert_check() に
+last_prices 引数を追加しているのはこのためです（ループ側は前回価格を
+ファイルではなくメモリ上に保持し、5.5時間ごとにまとめてファイルへ保存します）。
+詳しくは scripts/portfolio_loop.py と .github/workflows/portfolio_loop.yml を
+参照してください。
 
 【2種類の判定基準を使い分けています（重要）】
-  ・アラート……「前回チェックの価格からどれだけ動いたか」を基準に判定します。
-    通常実行（alertモード）では前回チェック時の価格を data/last_check_prices.json
-    というファイルから読み込んで比較し、実行の最後に今回の価格で上書き保存
-    （→GitHubへコミット）します。ループ実行では、このファイルの読み書きを
-    毎回行う代わりに、呼び出し側がメモリ上の辞書を直接渡します。
-    こうすることで、急な値動きが起きた「その瞬間」だけアラートが届き、いったん動いた後
-    その水準にとどまっている間は再送されません（前日終値を基準にすると、一度3%を超えた
-    まま値が動かなくても、同じアラートが届き続けてしまうため）。
-  ・定時サマリー……従来通り「前日終値からの変化率」を基準にします。
-    実行されるたびに、値動きの大きさに関係なく必ず送信します。
+・アラート……「前回チェックの価格からどれだけ動いたか」を基準に判定します。
+通常実行（alertモード）では前回チェック時の価格を data/last_check_prices.json
+というファイルから読み込んで比較し、実行の最後に今回の価格で上書き保存
+（→GitHubへコミット）します。ループ実行では、このファイルの読み書きを
+毎回行う代わりに、呼び出し側がメモリ上の辞書を直接渡します。
+こうすることで、急な値動きが起きた「その瞬間」だけアラートが届き、いったん動いた後
+その水準にとどまっている間は再送されません（前日終値を基準にすると、一度3%を超えた
+まま値が動かなくても、同じアラートが届き続けてしまうため）。
+・定時サマリー……従来通り「前日終値からの変化率」を基準にします。
+実行されるたびに、値動きの大きさに関係なく必ず送信します。
 
 【個別銘柄の売買推奨は一切行いません。あくまで価格変動の事実をお知らせするだけです。】
 
 【価格の正確性について】
-  Yahoo!ファイナンス（yfinance経由）のデータには、プレマーケット中の
-  regularMarketPreviousClose（「前々日」の終値を指してしまうことがある）を
-  そのまま前日終値として使うと、実際より大きく・的外れな変化率になることがある
-  ため、このスクリプトでは以下のように補正しています。
-  ・プレマーケット中／アフターマーケット中は、Yahoo!ファイナンス自身が計算する
-    preMarketChangePercent／postMarketChangePercent（あれば）を最優先で使う。
-  ・それらが無い場合のみ自前で計算するが、その際の基準値は
-    regularMarketPreviousClose ではなく、直近の通常取引終値である
-    regularMarketPrice を使う（詳しくは get_reference_snapshot() のコメント参照）。
+Yahoo!ファイナンス（yfinance経由）のデータには、プレマーケット中の
+regularMarketPreviousClose（「前々日」の終値を指してしまうことがある）を
+そのまま前日終値として使うと、実際より大きく・的外れな変化率になることがある
+ため、このスクリプトでは以下のように補正しています。
+・プレマーケット中／アフターマーケット中は、Yahoo!ファイナンス自身が計算する
+preMarketChangePercent／postMarketChangePercent（あれば）を最優先で使う。
+・それらが無い場合のみ自前で計算するが、その際の基準値は
+regularMarketPreviousClose ではなく、直近の通常取引終値である
+regularMarketPrice を使う（詳しくは get_reference_snapshot() のコメント参照）。
 
 【使っている言葉の説明】
-  ・yfinance …… Yahoo!ファイナンスの株価データを無料で取得できるPythonの道具（ライブラリ）。
-  ・時間外取引・プレマーケット …… 米国株の通常取引時間（日本時間の夜〜早朝）の
-    前後に行われる取引のこと。値動きが大きくなりやすい。
-  ・環境変数 (environment variable) …… プログラムの外側から渡す「設定値」のこと。
-    ここではGmailのアドレスやアプリパスワードを、コードに直接書かずに
-    GitHubの「Secrets（暗号化された設定値）」から環境変数として受け取っています。
-  ・SMTP …… メールを送信するための世界共通の仕組み（プロトコル）。ここではGmailの
-    SMTPサーバーを使って送信します。
+・yfinance …… Yahoo!ファイナンスの株価データを無料で取得できるPythonの道具（ライブラリ）。
+・時間外取引・プレマーケット …… 米国株の通常取引時間（日本時間の夜〜早朝）の
+前後に行われる取引のこと。値動きが大きくなりやすい。
+・環境変数 (environment variable) …… プログラムの外側から渡す「設定値」のこと。
+ここではGmailのアドレスやアプリパスワードを、コードに直接書かずに
+GitHubの「Secrets（暗号化された設定値）」から環境変数として受け取っています。
+・SMTP …… メールを送信するための世界共通の仕組み（プロトコル）。ここではGmailの
+SMTPサーバーを使って送信します。
 """
 
 import json
@@ -171,6 +171,29 @@ def get_reference_snapshot(ticker):
     自身が計算済みの preMarketChangePercent／postMarketChangePercent を優先して
     使い、それが無い場合のみ regularMarketPrice を基準に自前で計算する
     （regularMarketPreviousClose は使わない）。
+
+    【2026-08-13 追記：NBILの異常値（+68.28%）バグの修正】
+    上記の対策は「PRE/POST状態で、Yahoo側のプレマーケット価格
+    （preMarketPrice/postMarketPrice）が取得できている」場合にのみ機能していた。
+    ところが、新規上場間もない・出来高の少ない銘柄（NBILなど）では、
+    marketStateが"PRE"（またはYahooの表示上の「Overnight」取引時間帯で
+    "PREPRE"）を返しているにもかかわらず、preMarketPriceフィールド自体が
+    Noneのまま、という状態が実際に発生することが分かった。
+    この場合、修正前のコードは何もチェックせずに elif regular_price: の
+    分岐（本来はREGULAR/CLOSED状態向け）に落ちてしまい、
+    regularMarketPrice（＝前営業日の終値）と regularMarketPreviousClose
+    （＝前々営業日の終値）を比べてしまうため、上記と全く同じ「2営業日分を
+    1日分として計算してしまう」不具合が再発していた
+    （NBILで前々日終値20.71ドル・前日終値34.85ドルとなり、本来なら
+    直近の実際の値動き（Overnight取引で-5%程度）を示すべきところ、
+    (34.85/20.71-1)*100 = +68.28% という前日1日分の変化を「プレマーケットの
+    変化」として誤って表示してしまっていた）。
+    そのため、PRE/PREPRE状態なのに preMarketPrice が無い場合、および
+    POST/POSTPOST状態なのに postMarketPrice が無い場合は、無理に
+    regularMarketPrice/regularMarketPreviousCloseで計算せず、この銘柄は
+    「今回は取得失敗」として扱いNoneを返すようにした。ループ実行では
+    5分後に再度取得を試みるため、Yahoo側にプレマーケット価格が反映され
+    次第、自動的に正しい値へ復帰する。
     """
     try:
         t = yf.Ticker(ticker)
@@ -193,13 +216,24 @@ def get_reference_snapshot(ticker):
         pct_change = None
         usd_change_per_share = None
 
-        if market_state in ("PRE", "PREPRE") and pre_price:
+        if market_state in ("PRE", "PREPRE"):
+            if not pre_price:
+                # プレマーケット状態と判定されているのに、Yahoo側の
+                # プレマーケット価格がまだ提供されていない（NBILのような
+                # 薄商いの新規銘柄で発生）。ここで regularMarketPrice /
+                # regularMarketPreviousClose を使うと「前々日終値」を
+                # 基準にした誤った変化率になってしまうため、計算せずに
+                # 今回は取得失敗として扱う（次回チェックで再取得）。
+                return None
             current_price = pre_price
             reference_price = regular_price or regular_previous_close
             if pre_change_pct is not None:
                 pct_change = float(pre_change_pct)
                 usd_change_per_share = float(pre_change_usd) if pre_change_usd is not None else None
-        elif market_state in ("POST", "POSTPOST") and post_price:
+        elif market_state in ("POST", "POSTPOST"):
+            if not post_price:
+                # 上と同じ理由（アフターマーケット版）。
+                return None
             current_price = post_price
             reference_price = regular_price or regular_previous_close
             if post_change_pct is not None:
@@ -269,10 +303,10 @@ def build_alert_check(holdings, usdjpy_rate, last_prices=None):
     メモリ上に保持している辞書を直接渡すことで、毎回のファイル読み込みを省略できる。
 
     戻り値: (triggered, current_prices)
-      triggered …… ±3%以上動いた銘柄の情報リスト（前回価格が無い＝初回チェックの
-                    銘柄は、比較対象が無いためアラート対象にはしない）
-      current_prices … 今回取得できた「銘柄→現在値」の辞書。呼び出し側で
-                        次回チェック用に保存する。
+    triggered …… ±3%以上動いた銘柄の情報リスト（前回価格が無い＝初回チェックの
+    銘柄は、比較対象が無いためアラート対象にはしない）
+    current_prices … 今回取得できた「銘柄→現在値」の辞書。呼び出し側で
+    次回チェック用に保存する。
     """
     if last_prices is None:
         last_prices = load_last_check_prices()
