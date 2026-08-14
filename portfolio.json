@@ -1,9 +1,9 @@
 {
   "holdings": [
     {
-      "ticker": "NBIL",
-      "shares": 70.0,
-      "cost_basis": 22.27
+      "ticker": "SNDK",
+      "shares": 1.0,
+      "cost_basis": 1471.9
     },
     {
       "ticker": "AAOG",
@@ -22,5 +22,5 @@
     }
   ],
   "cash_jpy": 600000.0,
-  "updated_at": "2026-08-13T02:05:14Z"
+  "updated_at": "2026-08-14T08:03:43Z"
 }
