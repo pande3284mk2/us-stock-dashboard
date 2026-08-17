@@ -2,25 +2,25 @@
   "holdings": [
     {
       "ticker": "AKAN",
-      "shares": 70.0,
+      "shares": 70,
       "cost_basis": 8.8862
     },
     {
-      "ticker": "TONL",
-      "shares": 70.0,
+      "ticker": "IONL",
+      "shares": 70,
       "cost_basis": 14.227
     },
     {
       "ticker": "KOPN",
-      "shares": 200.0,
+      "shares": 200,
       "cost_basis": 5.0247
     },
     {
       "ticker": "SNDK",
-      "shares": 1471.98,
-      "cost_basis": 1500.0
+      "shares": 1,
+      "cost_basis": 1471.98
     }
   ],
-  "cash_jpy": 600000.0,
-  "updated_at": "2026-08-17T15:55:04Z"
+  "cash_jpy": 600000,
+  "updated_at": "2026-08-17T15:59:05Z"
 }
