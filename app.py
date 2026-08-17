@@ -2100,7 +2100,7 @@ def render_portfolio_image_upload():
     portfolio.jsonに反映する。保存すると保有銘柄は丸ごと置き換わる
     （預り金の金額は変更しない）。
     """
-    with st.expander("U0001F4F7 証券アプリのスクリーンショットから自動入力（試験機能）"):
+    with st.expander("📷 証券アプリのスクリーンショットから自動入力（試験機能）"):
         st.caption(
             "保有銘柄一覧の画面（銘柄コード・保有株数・平均取得単価が写っているもの）の"
             "スクリーンショットをアップロードすると、OCR（無料のオフライン文字認識）で"
@@ -2113,12 +2113,12 @@ def render_portfolio_image_upload():
             key="pf_ocr_image",
         )
 
-        if uploaded_image is not None and st.button("U0001F50D 画像を読み取る", key="pf_ocr_extract_btn"):
+        if uploaded_image is not None and st.button("🔍 画像を読み取る", key="pf_ocr_extract_btn"):
             try:
                 image = Image.open(uploaded_image)
                 ocr_text = pytesseract.image_to_string(image, lang="eng", config="--psm 6")
             except Exception as e:
-                st.error(f"U0001F625 画像の読み取りに失敗しました：{e}")
+                st.error(f"😥 画像の読み取りに失敗しました：{e}")
                 ocr_text = None
             if ocr_text is not None:
                 for i in range(MAX_PORTFOLIO_HOLDINGS):
@@ -2177,7 +2177,7 @@ def render_portfolio_image_upload():
             )
             if st.button("✅ この内容で保存する", key="pf_ocr_save_btn"):
                 if not edited:
-                    st.error("U0001F625 保存できる銘柄がありません。ティッカーと保有株数をご確認ください。")
+                    st.error("😥 保存できる銘柄がありません。ティッカーと保有株数をご確認ください。")
                 else:
                     cash_jpy = _current_cash_jpy()
                     ok, err = save_portfolio_to_github(edited, cash_jpy)
@@ -2197,7 +2197,7 @@ def render_portfolio_image_upload():
                         )
                         del st.session_state["pf_ocr_parsed"]
                     else:
-                        st.error(f"U0001F625 保存に失敗しました：{err}")
+                        st.error(f"😥 保存に失敗しました：{err}")
 
 
 def render_portfolio_form():
