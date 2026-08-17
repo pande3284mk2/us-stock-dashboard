@@ -32,6 +32,8 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 
 import pandas as pd
+import pytesseract
+from PIL import Image
 import plotly.express as px
 import plotly.graph_objects as go
 import requests
@@ -2044,6 +2046,160 @@ def render_institutional_investors():
         render_dataroma_highlights()
 
 
+def _parse_holdings_from_ocr_text(ocr_text):
+    """OCR（画像からのテキスト抽出）で得られたテキストから、保有銘柄らしき
+    「ティッカー・保有株数・平均取得単価」の組み合わせを正規表現で抽出する。
+
+    証券会社アプリの保有銘柄一覧画面（例: 楽天証券）では、1銘柄について
+    おおむね「銘柄名／ティッカー（英字）／保有数量(株)／平均取得価額(ドル)／現在値(ドル)」
+    が横並びで表示されることが多い。OCRでは同じ行として認識されることを期待し、
+    行ごとに英字のティッカーらしき文字列と、それに続く数値をいくつか拾い、
+    先頭2つの数値を「保有株数」「平均取得単価」の候補として扱う。
+
+    無料のOCR（pytesseract）を使っているため、読み取り精度は完璧ではない。
+    このため呼び出し側では、ここで抽出した内容をそのまま保存せず、
+    必ず画面上で確認・修正できるようにしている。
+    """
+    results = []
+    ticker_pattern = re.compile(r"\b[A-Z]{2,5}\b")
+    number_pattern = re.compile(r"\d[\d,]*\.\d+|\d[\d,]{1,}")
+    ignore_tokens = {"USD", "JPY", "ETF", "OTC", "NYSE", "NASDAQ"}
+
+    for raw_line in ocr_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        tickers = [t for t in ticker_pattern.findall(line) if t not in ignore_tokens]
+        if not tickers:
+            continue
+        numbers = []
+        for n in number_pattern.findall(line):
+            try:
+                numbers.append(float(n.replace(",", "")))
+            except ValueError:
+                continue
+        if len(numbers) < 2:
+            continue
+        ticker = tickers[0]
+        shares, cost_basis = numbers[0], numbers[1]
+        if shares <= 0:
+            continue
+        results.append({"ticker": ticker, "shares": shares, "cost_basis": cost_basis})
+
+    return results[:MAX_PORTFOLIO_HOLDINGS]
+
+
+def render_portfolio_image_upload():
+    """証券会社アプリの「保有銘柄」一覧画面のスクリーンショットを
+    アップロードすると、無料のOCRライブラリ（pytesseract、オフラインで動作しAPI課金は発生しない）で
+    画像からテキストを抽出し、銘柄コード・保有株数・平均取得単価らしき
+    数値を読み取る。
+
+    OCRの読み取り精度は完璧ではないため、読み取り結果をそのまま保存せず、
+    必ず編集可能な確認フォームを経て「この内容で保存する」を押したときだけ
+    portfolio.jsonに反映する。保存すると保有銘柄は丸ごと置き換わる
+    （預り金の金額は変更しない）。
+    """
+    with st.expander("U0001F4F7 証券アプリのスクリーンショットから自動入力（試験機能）"):
+        st.caption(
+            "保有銘柄一覧の画面（銘柄コード・保有株数・平均取得単価が写っているもの）の"
+            "スクリーンショットをアップロードすると、OCR（無料のオフライン文字認識）で"
+            "自動的に読み取りを試みます。読み取り精度は完璧ではないため、"
+            "保存前に必ず内容をご確認・修正ください。"
+        )
+        uploaded_image = st.file_uploader(
+            "スクリーンショット画像 (PNG / JPEG)",
+            type=["png", "jpg", "jpeg"],
+            key="pf_ocr_image",
+        )
+
+        if uploaded_image is not None and st.button("U0001F50D 画像を読み取る", key="pf_ocr_extract_btn"):
+            try:
+                image = Image.open(uploaded_image)
+                ocr_text = pytesseract.image_to_string(image, lang="eng", config="--psm 6")
+            except Exception as e:
+                st.error(f"U0001F625 画像の読み取りに失敗しました：{e}")
+                ocr_text = None
+            if ocr_text is not None:
+                for i in range(MAX_PORTFOLIO_HOLDINGS):
+                    st.session_state.pop(f"pf_ocr_ticker_{i}", None)
+                    st.session_state.pop(f"pf_ocr_shares_{i}", None)
+                    st.session_state.pop(f"pf_ocr_cost_{i}", None)
+                st.session_state["pf_ocr_raw_text"] = ocr_text
+                st.session_state["pf_ocr_parsed"] = _parse_holdings_from_ocr_text(ocr_text)
+                if not st.session_state["pf_ocr_parsed"]:
+                    st.warning(
+                        "⚠️ 銘柄らしき行を読み取れませんでした。画像の解像度を上げる、"
+                        "保有銘柄一覧の部分だけを切り抜く、などをお試しいただくか、"
+                        "下の手入力フォームをご利用ください。"
+                    )
+
+        parsed = st.session_state.get("pf_ocr_parsed")
+        if parsed:
+            st.markdown("**読み取り結果（保存前に内容をご確認・修正ください）**")
+            edited = []
+            for i in range(min(len(parsed), MAX_PORTFOLIO_HOLDINGS)):
+                row = parsed[i]
+                cols = st.columns([2, 2, 2])
+                with cols[0]:
+                    t = st.text_input(
+                        f"ティッカー（読み取り結果 {i + 1}）",
+                        value=str(row.get("ticker", "")),
+                        key=f"pf_ocr_ticker_{i}",
+                    ).strip().upper()
+                with cols[1]:
+                    s = st.number_input(
+                        f"保有株数（読み取り結果 {i + 1}）",
+                        value=float(row.get("shares", 0.0)),
+                        min_value=0.0,
+                        step=1.0,
+                        format="%.4f",
+                        key=f"pf_ocr_shares_{i}",
+                    )
+                with cols[2]:
+                    c = st.number_input(
+                        f"取得単価（読み取り結果 {i + 1}）",
+                        value=float(row.get("cost_basis", 0.0)),
+                        min_value=0.0,
+                        step=0.01,
+                        format="%.2f",
+                        key=f"pf_ocr_cost_{i}",
+                    )
+                if t and s > 0:
+                    edited.append({"ticker": t, "shares": s, "cost_basis": c})
+
+            with st.expander("OCRで抽出した生テキスト（デバッグ用）"):
+                st.text(st.session_state.get("pf_ocr_raw_text", ""))
+
+            st.caption(
+                "「この内容で保存する」を押すと、上記の内容で保有銘柄を"
+                "**丸ごと置き換えて**GitHubに保存します（預り金の金額は変更されません）。"
+            )
+            if st.button("✅ この内容で保存する", key="pf_ocr_save_btn"):
+                if not edited:
+                    st.error("U0001F625 保存できる銘柄がありません。ティッカーと保有株数をご確認ください。")
+                else:
+                    cash_jpy = _current_cash_jpy()
+                    ok, err = save_portfolio_to_github(edited, cash_jpy)
+                    if ok:
+                        for i in range(MAX_PORTFOLIO_HOLDINGS):
+                            if i < len(edited):
+                                st.session_state[f"pf_ticker_{i}"] = edited[i]["ticker"]
+                                st.session_state[f"pf_shares_{i}"] = float(edited[i]["shares"])
+                                st.session_state[f"pf_cost_{i}"] = float(edited[i]["cost_basis"])
+                            else:
+                                st.session_state[f"pf_ticker_{i}"] = ""
+                                st.session_state[f"pf_shares_{i}"] = 0.0
+                                st.session_state[f"pf_cost_{i}"] = 0.0
+                        st.success(
+                            "✅ 画像から読み取った内容でポートフォリオをGitHubに保存し、"
+                            "下のフォームにも反映しました。"
+                        )
+                        del st.session_state["pf_ocr_parsed"]
+                    else:
+                        st.error(f"U0001F625 保存に失敗しました：{err}")
+
+
 def render_portfolio_form():
     """保有銘柄の入力フォーム（最大5銘柄）。「保存する」を押すとGitHub上の
     portfolio.jsonに書き込む。
@@ -3113,6 +3269,7 @@ def render_portfolio_page(period_key):
 
     init_portfolio_state()
     render_extended_hours_summary(_current_portfolio_holdings(), get_usdjpy_rate())
+    render_portfolio_image_upload()
     render_portfolio_form()
     st.markdown("**💰 保有状況**")
     _portfolio_holdings = render_portfolio_holdings(period_key)
